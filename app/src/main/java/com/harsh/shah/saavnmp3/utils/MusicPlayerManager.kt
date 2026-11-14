@@ -310,9 +310,14 @@ object MusicPlayerManager {
         if (MelotuneMediaLibraryService.isRunning) return
         try {
             val intent = Intent(ctx, MelotuneMediaLibraryService::class.java)
-            ContextCompat.startForegroundService(ctx, intent)
+            ctx.startService(intent)
         } catch (e: Exception) {
-            Log.w(TAG, "Unable to start MelotuneMediaLibraryService: ${e.message}")
+            try {
+                val intent = Intent(ctx, MelotuneMediaLibraryService::class.java)
+                ContextCompat.startForegroundService(ctx, intent)
+            } catch (fgEx: Exception) {
+                Log.w(TAG, "Unable to start MelotuneMediaLibraryService: ${fgEx.message}")
+            }
         }
     }
 
