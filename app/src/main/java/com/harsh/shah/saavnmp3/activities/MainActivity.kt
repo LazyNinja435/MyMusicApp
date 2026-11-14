@@ -328,6 +328,12 @@ class MainActivity : AppCompatActivity() {
                 slidingRootNavBuilder!!.closeMenu()
             }
 
+        slidingRootNavBuilder!!.layout.findViewById<View>(R.id.check_updates)
+            .setOnClickListener {
+                slidingRootNavBuilder!!.closeMenu()
+                UpdateUtil.checkForUpdates(this@MainActivity, true)
+            }
+
         slidingRootNavBuilder!!.layout.findViewById<View>(R.id.download_manager)
             .setOnClickListener {
                 startActivity(Intent(this@MainActivity, DownloadManagerActivity::class.java))

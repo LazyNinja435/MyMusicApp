@@ -116,6 +116,14 @@
             android:src="@drawable/round_info_outline_24"
             app:srcPadding="@dimen/_4sdp" />
 
+        <com.harsh.shah.saavnmp3.utils.customview.BottomSheetItemView
+            android:id="@+id/check_updates"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:title="Check for Updates"
+            android:src="@drawable/baseline_download_for_offline_24"
+            app:srcPadding="@dimen/_4sdp" />
+
     </LinearLayout>
 
     <View
