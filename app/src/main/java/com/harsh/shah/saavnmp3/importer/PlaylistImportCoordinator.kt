@@ -206,13 +206,27 @@ class PlaylistImportCoordinator(
                                 )
                             }
                         }
-                        MatchConfidenceStatus.NEEDS_REVIEW -> current.copy(
-                            status = ImportItemStatus.NEEDS_REVIEW,
-                            selectedSong = null,
-                            candidates = matchResult.candidates,
-                            confidenceScore = matchResult.candidates.firstOrNull()?.score ?: 0.0,
-                            note = "Review ${matchResult.candidates.size} candidate(s)"
-                        )
+                        MatchConfidenceStatus.NEEDS_REVIEW -> {
+                            val firstCandidate = matchResult.candidates.firstOrNull()?.song
+                            val songId = firstCandidate?.id
+                            if (songId != null && !seenSongIds.add(songId)) {
+                                current.copy(
+                                    status = ImportItemStatus.DUPLICATE,
+                                    selectedSong = firstCandidate,
+                                    candidates = matchResult.candidates,
+                                    confidenceScore = matchResult.candidates.firstOrNull()?.score ?: 0.0,
+                                    note = "Duplicate matched song in playlist"
+                                )
+                            } else {
+                                current.copy(
+                                    status = ImportItemStatus.NEEDS_REVIEW,
+                                    selectedSong = firstCandidate,
+                                    candidates = matchResult.candidates,
+                                    confidenceScore = matchResult.candidates.firstOrNull()?.score ?: 0.0,
+                                    note = "Auto-selected top match • ${matchResult.candidates.size} candidate(s)"
+                                )
+                            }
+                        }
                         MatchConfidenceStatus.FAILED -> current.copy(
                             status = ImportItemStatus.FAILED,
                             selectedSong = null,
@@ -303,12 +317,27 @@ class PlaylistImportCoordinator(
                             )
                         }
                     }
-                    MatchConfidenceStatus.NEEDS_REVIEW -> item.copy(
-                        status = ImportItemStatus.NEEDS_REVIEW,
-                        candidates = matchResult.candidates,
-                        confidenceScore = matchResult.candidates.firstOrNull()?.score ?: 0.0,
-                        note = "Review ${matchResult.candidates.size} candidate(s)"
-                    )
+                    MatchConfidenceStatus.NEEDS_REVIEW -> {
+                        val firstCandidate = matchResult.candidates.firstOrNull()?.song
+                        val songId = firstCandidate?.id
+                        if (songId != null && !existingSongIds.add(songId)) {
+                            item.copy(
+                                status = ImportItemStatus.DUPLICATE,
+                                selectedSong = firstCandidate,
+                                candidates = matchResult.candidates,
+                                confidenceScore = matchResult.candidates.firstOrNull()?.score ?: 0.0,
+                                note = "Duplicate matched song in playlist"
+                            )
+                        } else {
+                            item.copy(
+                                status = ImportItemStatus.NEEDS_REVIEW,
+                                selectedSong = firstCandidate,
+                                candidates = matchResult.candidates,
+                                confidenceScore = matchResult.candidates.firstOrNull()?.score ?: 0.0,
+                                note = "Auto-selected top match • ${matchResult.candidates.size} candidate(s)"
+                            )
+                        }
+                    }
                     MatchConfidenceStatus.FAILED -> item.copy(
                         status = ImportItemStatus.FAILED,
                         candidates = matchResult.candidates,
@@ -347,7 +376,8 @@ class PlaylistImportCoordinator(
         val state = _uiState.value
         val selectedSongs = state.items
             .filter {
-                it.status == ImportItemStatus.MATCHED ||
+                ((it.status == ImportItemStatus.MATCHED || it.status == ImportItemStatus.NEEDS_REVIEW) &&
+                    it.selectedSong != null) ||
                     (includeDuplicates && it.status == ImportItemStatus.DUPLICATE && it.selectedSong != null)
             }
             .mapNotNull { it.selectedSong?.toSavedLibrarySong() }
@@ -376,7 +406,10 @@ class PlaylistImportCoordinator(
 
     private fun saveProgressCheckpoint(state: PlaylistImportUiState) {
         val matched = state.items
-            .filter { it.status == ImportItemStatus.MATCHED && it.selectedSong != null }
+            .filter {
+                (it.status == ImportItemStatus.MATCHED || it.status == ImportItemStatus.NEEDS_REVIEW) &&
+                    it.selectedSong != null
+            }
             .mapNotNull { it.selectedSong?.toSavedLibrarySong() }
         persistence.saveCheckpoint(
             PlaylistImportCheckpoint(

@@ -28,6 +28,7 @@ import com.harsh.shah.saavnmp3.importer.ImportTrackItemState
 import com.harsh.shah.saavnmp3.importer.JioSaavnSongMatcher
 import com.harsh.shah.saavnmp3.importer.PlaylistImportCoordinator
 import com.harsh.shah.saavnmp3.importer.PlaylistImportRepository
+import com.harsh.shah.saavnmp3.importer.PlaylistImportService
 import com.harsh.shah.saavnmp3.importer.PlaylistImportUiState
 import com.harsh.shah.saavnmp3.importer.ScoredSongCandidate
 import com.harsh.shah.saavnmp3.importer.SongTitleNormalizer
@@ -51,15 +52,8 @@ class PlaylistImportActivity : AppCompatActivity() {
         binding = ActivityPlaylistImportBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        repository = PlaylistImportRepository(this)
-        val searchDataSource = ApiManagerJioSaavnSearch(this)
-        val matcher = JioSaavnSongMatcher(searchDataSource)
-        coordinator = PlaylistImportCoordinator(
-            youTubeClient = YouTubePlaylistClient(),
-            jioSaavnSearch = searchDataSource,
-            matcher = matcher,
-            persistence = repository
-        )
+        repository = PlaylistImportRepository(applicationContext)
+        coordinator = PlaylistImportService.getOrCreateCoordinator(applicationContext)
 
         adapter = ImportTracksAdapter { item ->
             showCandidatePicker(item)
@@ -75,19 +69,19 @@ class PlaylistImportActivity : AppCompatActivity() {
             val url = binding.urlEditText.text?.toString().orEmpty()
             if (repository.getYouTubeApiKey().isBlank()) {
                 showApiKeyDialog {
-                    coordinator.startImport(url)
+                    PlaylistImportService.startImport(this, url)
                 }
             } else {
-                coordinator.startImport(url)
+                PlaylistImportService.startImport(this, url)
             }
         }
 
         binding.cancelImportBtn.setOnClickListener {
-            coordinator.cancelImport()
+            PlaylistImportService.cancelImport(this)
         }
 
         binding.retryFailedBtn.setOnClickListener {
-            coordinator.retryFailedMatches()
+            PlaylistImportService.retryFailedMatches(this)
         }
 
         binding.savePlaylistBtn.setOnClickListener {
@@ -124,7 +118,7 @@ class PlaylistImportActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        coordinator.dispose()
+        // Keep background import running in PlaylistImportService when Activity is closed.
         super.onDestroy()
     }
 
@@ -176,9 +170,17 @@ class PlaylistImportActivity : AppCompatActivity() {
 
         adapter.submitList(state.items)
 
-        val canSave = !isRunning && state.matchedCount > 0
+        val saveableCount = state.items.count {
+            (it.status == ImportItemStatus.MATCHED || it.status == ImportItemStatus.NEEDS_REVIEW) &&
+                it.selectedSong != null
+        }
+        val canSave = !isRunning && saveableCount > 0
         binding.bottomActionBar.visibility = if (canSave) View.VISIBLE else View.GONE
-        binding.saveSummaryText.text = "Ready to save ${state.matchedCount} matched song(s)"
+        binding.saveSummaryText.text = if (state.needsReviewCount > 0) {
+            "Ready to save $saveableCount song(s) (${state.needsReviewCount} auto-selected; review optional)"
+        } else {
+            "Ready to save $saveableCount matched song(s)"
+        }
     }
 
     private fun showApiKeyDialog(onSaved: (() -> Unit)? = null) {

@@ -202,4 +202,52 @@ class PlaylistImportCoordinatorTest {
         assertEquals(ImportPhase.CANCELLED, coordinator.uiState.value.phase)
         assertNotNull(persistence.loadCheckpoint())
     }
+
+    @Test
+    fun `needs review automatically selects first match and includes it when saving`() = runTest(testDispatcher) {
+        val ytSource = object : YouTubePlaylistDataSource {
+            override fun fetchPlaylist(
+                playlistId: String,
+                apiKey: String,
+                onPageFetched: ((Int, Int?) -> Unit)?
+            ): YouTubePlaylistFetchResult {
+                return YouTubePlaylistFetchResult(
+                    metadata = YouTubePlaylistMetadata(playlistId, "Auto Select Mix", "", null, 1),
+                    tracks = listOf(
+                        YouTubePlaylistTrack("v1", 0, "Mastaaru Mastaaru Full Video", "Channel", null, 250, null, true)
+                    )
+                )
+            }
+        }
+        val saavnSearch = object : JioSaavnSearchDataSource {
+            override suspend fun searchSongs(query: String, limit: Int): List<Song> {
+                return listOf(
+                    song("id_first", "Mastaaru Mastaaru", "G.V. Prakash", "Sir"),
+                    song("id_second", "Mastaaru Mastaaru Lofi", "Other", "Sir")
+                )
+            }
+        }
+        val persistence = FakePersistence()
+        val coordinator = PlaylistImportCoordinator(
+            youTubeClient = ytSource,
+            jioSaavnSearch = saavnSearch,
+            matcher = JioSaavnSongMatcher(saavnSearch),
+            persistence = persistence,
+            ioDispatcher = testDispatcher
+        )
+
+        coordinator.startImport("https://www.youtube.com/playlist?list=PL1234567890ABCDEF")
+        advanceUntilIdle()
+
+        val state = coordinator.uiState.value
+        assertEquals(ImportPhase.COMPLETED, state.phase)
+        val item = state.items.first()
+        assertNotNull(item.selectedSong)
+        assertEquals("id_first", item.selectedSong?.id)
+
+        val saved = coordinator.saveImportedPlaylist()
+        assertNotNull(saved)
+        assertEquals(1, saved!!.songs?.size)
+        assertEquals("id_first", saved.songs?.first()?.id)
+    }
 }
