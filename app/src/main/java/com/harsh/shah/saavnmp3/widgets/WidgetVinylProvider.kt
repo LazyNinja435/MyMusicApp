@@ -126,8 +126,12 @@ class WidgetVinylProvider : AppWidgetProvider() {
 
             val views = RemoteViews(context.packageName, R.layout.widget_vinyl)
             views.setImageViewBitmap(R.id.widget_album_art, targetBitmap)
-            for (id in appWidgetIds) {
-                appWidgetManager.partiallyUpdateAppWidget(id, views)
+            try {
+                for (id in appWidgetIds) {
+                    appWidgetManager.partiallyUpdateAppWidget(id, views)
+                }
+            } catch (e: Exception) {
+                stopRotation()
             }
         }
 
@@ -201,6 +205,7 @@ class WidgetVinylProvider : AppWidgetProvider() {
                     Glide.with(context.applicationContext)
                         .asBitmap()
                         .load(imageUrl)
+                        .override(256, 256)
                         .transform(CircleCrop())
                         .into(object : CustomTarget<Bitmap>() {
                             override fun onResourceReady(bitmap: Bitmap, transition: Transition<in Bitmap>?) {

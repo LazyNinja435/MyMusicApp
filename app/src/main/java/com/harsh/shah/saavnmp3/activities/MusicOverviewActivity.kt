@@ -775,9 +775,13 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
                     response: String?,
                     responseHeaders: HashMap<String?, Any?>?
                 ) {
-                    val songResponse =
+                    val songResponse = try {
                         Gson().fromJson<SongResponse>(response, SongResponse::class.java)
-                    if (songResponse.success) {
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to parse song response for $ID: ${e.message}")
+                        null
+                    }
+                    if (songResponse != null && songResponse.success) {
                         onSongFetched(songResponse)
                         SharedPreferenceManager.getInstance(this@MusicOverviewActivity)
                             .setSongResponseById(
@@ -933,6 +937,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
                 ).getOrNull()
 
                 withContext(Dispatchers.Main) {
+                    if (isFinishing || isDestroyed || binding == null) return@withContext
                     if (!fetchedLyrics.isNullOrEmpty()) {
                         val sentencesMap = com.samyak.lrclib.LrcLib.Lyrics(fetchedLyrics).sentences
                         if (!sentencesMap.isNullOrEmpty()) {
@@ -1189,6 +1194,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
                 binding!!.totalDuration.text = "00:00"
                 // Schedule a retry to get the duration
                 Handler(Looper.getMainLooper()).postDelayed({
+                    if (isFinishing || isDestroyed || binding == null) return@postDelayed
                     val p2 = MusicPlayerManager.player
                     if (p2 != null && p2.duration > 0) {
                         binding!!.totalDuration.text = convertDuration(p2.duration)
@@ -1204,16 +1210,11 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
             }
             updateSeekbar()
 
-            // Update notification
-            // showNotification(BaseApplicationClass.player.isPlaying() ?
-            // R.drawable.baseline_pause_24
-            // : R.drawable.play_arrow_24px);
-            // BaseApplicationClass handles notification updates
         } catch (e: Exception) {
             Log.e(TAG, "Error preparing media player", e)
-            // Try to recover
-            Toast.makeText(this, "Error playing track. Retrying...", Toast.LENGTH_SHORT).show()
-            Handler().postDelayed(Runnable { this.prepareMediaPLayer() }, 1000)
+            if (!isFinishing && !isDestroyed) {
+                Toast.makeText(this, "Error playing track", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -1221,6 +1222,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
 
     fun updateSeekbar() {
         handler.removeCallbacks(runnable)
+        if (isFinishing || isDestroyed || binding == null) return
         try {
             if (MusicPlayerManager.player == null) {
                 Log.e(TAG, "Player is null in updateSeekbar")
@@ -1245,33 +1247,43 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
         handler.postDelayed(runnable, 250)
     }
 
-    private val mHandler = Handler()
+    private val mHandler = Handler(Looper.getMainLooper())
     private val mUpdateTimeTask = Runnable { this.updateTrackInfo() }
+    private var lastLoadedImageUrl: String? = null
 
     private fun updateTrackInfo() {
         mHandler.removeCallbacks(mUpdateTimeTask)
-        
+        if (isFinishing || isDestroyed || binding == null) return
+
         val currentTitle = binding!!.title.text.toString()
         if (currentTitle != MusicPlayerManager.MUSIC_TITLE) {
             binding!!.title.text = MusicPlayerManager.MUSIC_TITLE
-            
+
             val currentTrackData = MusicPlayerManager.CURRENT_TRACK?.data?.getOrNull(0)
             if (currentTrackData != null && currentTitle.isNotEmpty()) {
                 fetchLyricsForCurrentSong(currentTrackData)
             }
         }
-        
+
         if (binding!!.description.text.toString() != MusicPlayerManager.MUSIC_DESCRIPTION) {
             binding!!.description.text = MusicPlayerManager.MUSIC_DESCRIPTION
         }
-        if (!MusicPlayerManager.IMAGE_URL.isNullOrBlank()) {
-            Glide.with(binding!!.coverImage)
-                .load(MusicPlayerManager.IMAGE_URL)
-                .placeholder(R.drawable.baseline_album_24)
-                .error(R.drawable.baseline_album_24)
-                .into(binding!!.coverImage)
-        } else {
-            binding!!.coverImage.setImageResource(R.drawable.baseline_album_24)
+        val imageUrl = MusicPlayerManager.IMAGE_URL
+        if (imageUrl != lastLoadedImageUrl) {
+            lastLoadedImageUrl = imageUrl
+            if (!imageUrl.isNullOrBlank()) {
+                try {
+                    Glide.with(binding!!.coverImage)
+                        .load(imageUrl)
+                        .placeholder(R.drawable.baseline_album_24)
+                        .error(R.drawable.baseline_album_24)
+                        .into(binding!!.coverImage)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Glide load failed: ${e.message}")
+                }
+            } else {
+                binding!!.coverImage.setImageResource(R.drawable.baseline_album_24)
+            }
         }
         val p = MusicPlayerManager.player ?: return
         binding!!.seekbar.progress = ((p.currentPosition.toFloat() / p.duration) * 100).toInt()

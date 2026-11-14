@@ -300,6 +300,11 @@ object UpdateUtil {
     }
 
     private fun installApk(context: Context, apkFile: File) {
+        try {
+            SharedPreferenceManager.getInstance(context).exportLibraryBackupSync()
+        } catch (e: Exception) {
+            Log.w(TAG, "Pre-update library backup failed: ${e.message}")
+        }
         val apkUri = FileProvider.getUriForFile(
             context,
             "${context.packageName}.fileprovider",

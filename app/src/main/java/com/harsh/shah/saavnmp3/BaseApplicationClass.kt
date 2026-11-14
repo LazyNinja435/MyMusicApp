@@ -17,7 +17,11 @@ open class BaseApplicationClass : Application() {
         com.harsh.shah.saavnmp3.utils.ThemeManager.init(this)
         MusicPlayerManager.init(this)
 
-        sharedPreferenceManager!!.migrateFromOldPrefs(this) { sharedPreferenceManager!!.clearOldPrefsAsync(this, null) }
+        sharedPreferenceManager!!.migrateFromOldPrefs(this) {
+            sharedPreferenceManager!!.clearOldPrefsAsync(this) {
+                sharedPreferenceManager!!.restoreLibraryBackupIfEmpty()
+            }
+        }
     }
 
     companion object {

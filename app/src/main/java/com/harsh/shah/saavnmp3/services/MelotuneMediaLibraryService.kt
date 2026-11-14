@@ -90,6 +90,18 @@ class MelotuneMediaLibraryService : MediaLibraryService() {
         return mediaLibrarySession
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val result = super.onStartCommand(intent, flags, startId)
+        mediaLibrarySession?.let { session ->
+            try {
+                onUpdateNotification(session, true)
+            } catch (e: Exception) {
+                Log.w(TAG, "onUpdateNotification in onStartCommand failed: ${e.message}")
+            }
+        }
+        return result
+    }
+
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
         val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)

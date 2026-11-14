@@ -2,6 +2,10 @@ package com.harsh.shah.saavnmp3.utils
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Environment
+import android.util.Log
+import java.io.File
+import java.util.concurrent.Executors
 import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
@@ -71,10 +75,13 @@ internal abstract class AppDatabase : RoomDatabase() {
 }
 
 class SharedPreferenceManager private constructor(context: Context) {
+    private val appContext: Context = context.applicationContext
+    private val backupExecutor = Executors.newSingleThreadExecutor()
+
     // IMPORTANT: allowMainThreadQueries is enabled here for drop-in sync compatibility.
     // Recommended: remove allowMainThreadQueries() and perform DB operations off the UI thread.
     private val db: AppDatabase = databaseBuilder<AppDatabase>(
-        context.applicationContext,
+        appContext,
         AppDatabase::class.java,
         "saavn_cache.db"
     )
@@ -249,6 +256,7 @@ class SharedPreferenceManager private constructor(context: Context) {
         // saved libraries (full object)
         set(savedLibraries) {
             putJson("saved_libraries", gson.toJson(savedLibraries))
+            exportLibraryBackupAsync()
         }
 
     // add library to saved libraries (keeps same semantics as original)
@@ -502,6 +510,114 @@ class SharedPreferenceManager private constructor(context: Context) {
         return getJson(KEY_YT_IMPORT_CHECKPOINT)
     }
 
+    internal data class LibraryBackupPayload(
+        val savedLibraries: SavedLibraries? = null,
+        val librariesById: Map<String, Library> = emptyMap(),
+        val likedSongsJson: String? = null,
+        val youtubeImportedJson: String? = null
+    )
+
+    private fun getDefaultBackupFile(): File {
+        val musicDir = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
+            "Melotune"
+        )
+        return File(musicDir, ".melotune_library_backup.json")
+    }
+
+    fun exportLibraryBackupAsync() {
+        val payloadJson = buildBackupPayloadJson() ?: return
+        val targetFile = getDefaultBackupFile()
+        backupExecutor.execute {
+            writeBackupJsonToFile(targetFile, payloadJson)
+        }
+    }
+
+    fun exportLibraryBackupSync() {
+        exportLibraryBackupToFile(getDefaultBackupFile())
+    }
+
+    private fun buildBackupPayloadJson(): String? {
+        return try {
+            val saved = savedLibrariesData
+            val likedJson = getJson(KEY_LIKED_SONGS)
+            val ytJson = getJson(KEY_YT_IMPORTED_PLAYLISTS)
+            if (saved?.lists.isNullOrEmpty() && likedJson.isNullOrEmpty() && ytJson.isNullOrEmpty()) {
+                return null
+            }
+            val byId = LinkedHashMap<String, Library>()
+            saved?.lists?.forEach { lib ->
+                val id = lib?.id ?: return@forEach
+                val individual = getSavedLibraryDataById(id) ?: lib
+                byId[id] = individual
+            }
+            val payload = LibraryBackupPayload(
+                savedLibraries = saved,
+                librariesById = byId,
+                likedSongsJson = likedJson,
+                youtubeImportedJson = ytJson
+            )
+            gson.toJson(payload)
+        } catch (e: Exception) {
+            Log.w("SharedPreferenceManager", "Library backup serialization failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun writeBackupJsonToFile(backupFile: File, payloadJson: String): Boolean {
+        return try {
+            backupFile.parentFile?.mkdirs()
+            backupFile.writeText(payloadJson)
+            true
+        } catch (e: Exception) {
+            Log.w("SharedPreferenceManager", "Library backup write failed: ${e.message}")
+            false
+        }
+    }
+
+    internal fun exportLibraryBackupToFile(backupFile: File): Boolean {
+        val payloadJson = buildBackupPayloadJson() ?: return false
+        return writeBackupJsonToFile(backupFile, payloadJson)
+    }
+
+    fun restoreLibraryBackupIfEmpty() {
+        restoreLibraryBackupFromFileIfEmpty(getDefaultBackupFile())
+    }
+
+    internal fun restoreLibraryBackupFromFileIfEmpty(backupFile: File): Boolean {
+        return try {
+            val existing = savedLibrariesData
+            if (existing != null && !existing.lists.isNullOrEmpty()) return false
+            if (!backupFile.exists() || !backupFile.isFile) return false
+            val raw = backupFile.readText()
+            if (raw.isBlank()) return false
+            val payload = gson.fromJson(raw, LibraryBackupPayload::class.java) ?: return false
+
+            var restoredAny = false
+            val saved = payload.savedLibraries
+            if (saved != null && !saved.lists.isNullOrEmpty()) {
+                putJson("saved_libraries", gson.toJson(saved))
+                restoredAny = true
+            }
+            payload.librariesById.forEach { (id, lib) ->
+                setSavedLibraryDataById(id, lib)
+                restoredAny = true
+            }
+            if (!payload.likedSongsJson.isNullOrBlank() && getJson(KEY_LIKED_SONGS).isNullOrBlank()) {
+                putJson(KEY_LIKED_SONGS, payload.likedSongsJson)
+                restoredAny = true
+            }
+            if (!payload.youtubeImportedJson.isNullOrBlank() && getJson(KEY_YT_IMPORTED_PLAYLISTS).isNullOrBlank()) {
+                putJson(KEY_YT_IMPORTED_PLAYLISTS, payload.youtubeImportedJson)
+                restoredAny = true
+            }
+            restoredAny
+        } catch (e: Exception) {
+            Log.w("SharedPreferenceManager", "Library backup restore failed: ${e.message}")
+            false
+        }
+    }
+
     // ---------- Migration helpers for one-time migration ----------
     /**
      * Migrate all entries from the old SharedPreferences named "cache" into Room.
@@ -561,6 +677,14 @@ class SharedPreferenceManager private constructor(context: Context) {
         fun getInstance(context: Context): SharedPreferenceManager {
             if (instance == null) instance = SharedPreferenceManager(context)
             return instance!!
+        }
+
+        internal fun resetInstanceForTest() {
+            try {
+                instance?.db?.close()
+            } catch (_: Exception) {
+            }
+            instance = null
         }
     }
 }

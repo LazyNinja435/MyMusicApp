@@ -10,10 +10,12 @@ import com.harsh.shah.saavnmp3.records.sharedpref.SavedLibraries
 import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
 import com.harsh.shah.saavnmp3.utils.SharedPreferenceManager
 import kotlinx.coroutines.test.runTest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -23,6 +25,16 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class MelotuneMediaLibraryServiceTest {
+
+    @Before
+    fun setUp() {
+        SharedPreferenceManager.resetInstanceForTest()
+    }
+
+    @After
+    fun tearDown() {
+        SharedPreferenceManager.resetInstanceForTest()
+    }
 
     @Test
     fun `service binds as MediaLibraryService and exposes imported YouTube playlists`() = runTest {

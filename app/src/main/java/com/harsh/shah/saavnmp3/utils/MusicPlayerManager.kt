@@ -143,25 +143,29 @@ object MusicPlayerManager {
         appContext = context.applicationContext
         sharedPreferenceManager = SharedPreferenceManager.getInstance(appContext!!)
 
-        val cacheDir = File(appContext!!.cacheDir, "audio_cache")
-        val databaseProvider = ExoDatabaseProvider(appContext!!)
-        val cacheSize = (100 * 1024 * 1024).toLong() // 100 MB
-        val cacheEvictor = LeastRecentlyUsedCacheEvictor(cacheSize)
-        simpleCache = SimpleCache(cacheDir, cacheEvictor, databaseProvider)
-
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(Util.getUserAgent(appContext!!, "AudioCachingApp"))
             .setConnectTimeoutMs(15000)
             .setReadTimeoutMs(15000)
             .setAllowCrossProtocolRedirects(true)
 
-        val cacheDataSourceFactory = CacheDataSource.Factory()
-            .setCache(simpleCache!!)
-            .setUpstreamDataSourceFactory(httpDataSourceFactory)
-            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        val mediaDataSourceFactory: androidx.media3.datasource.DataSource.Factory = try {
+            val cacheDir = File(appContext!!.cacheDir, "audio_cache")
+            val databaseProvider = ExoDatabaseProvider(appContext!!)
+            val cacheSize = (100 * 1024 * 1024).toLong() // 100 MB
+            val cacheEvictor = LeastRecentlyUsedCacheEvictor(cacheSize)
+            simpleCache = SimpleCache(cacheDir, cacheEvictor, databaseProvider)
+            CacheDataSource.Factory()
+                .setCache(simpleCache!!)
+                .setUpstreamDataSourceFactory(httpDataSourceFactory)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        } catch (e: Exception) {
+            Log.w(TAG, "SimpleCache init failed, falling back to HTTP data source: ${e.message}")
+            httpDataSourceFactory
+        }
 
         player = ExoPlayer.Builder(appContext!!)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(cacheDataSourceFactory))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(mediaDataSourceFactory))
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setAudioAttributes(
@@ -207,6 +211,7 @@ object MusicPlayerManager {
                 Log.e(TAG, "Player error: ${error.message}")
                 isTransitioning = false
                 releaseWakeLock()
+                notifyPlaybackListeners()
             }
         })
 
@@ -245,15 +250,20 @@ object MusicPlayerManager {
                         .load(image)
                         .into(object : CustomTarget<Bitmap>() {
                             override fun onResourceReady(resource: Bitmap, transition: Transition<in Bitmap>?) {
-                                Palette.from(resource).generate { palette ->
-                                    palette?.let {
-                                        val swatch = it.darkMutedSwatch ?: it.darkVibrantSwatch ?: it.dominantSwatch
-                                        swatch?.let { s ->
-                                            IMAGE_BG_COLOR = s.rgb
-                                            TEXT_ON_IMAGE_COLOR = s.titleTextColor
-                                            TEXT_ON_IMAGE_COLOR1 = s.bodyTextColor
+                                if (resource.isRecycled) return
+                                try {
+                                    Palette.from(resource).generate { palette ->
+                                        palette?.let {
+                                            val swatch = it.darkMutedSwatch ?: it.darkVibrantSwatch ?: it.dominantSwatch
+                                            swatch?.let { s ->
+                                                IMAGE_BG_COLOR = s.rgb
+                                                TEXT_ON_IMAGE_COLOR = s.titleTextColor
+                                                TEXT_ON_IMAGE_COLOR1 = s.bodyTextColor
+                                            }
                                         }
                                     }
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Palette generation failed: ${e.message}")
                                 }
                             }
                             override fun onLoadCleared(placeholder: Drawable?) {}
@@ -341,7 +351,6 @@ object MusicPlayerManager {
         p.clearMediaItems()
         if (SONG_URL.isNullOrEmpty()) return
         acquireWakeLock(15000L)
-        ensureMediaServiceStarted()
 
         var finalUrl = SONG_URL ?: ""
         val isLocalFile = finalUrl.startsWith("file://") || finalUrl.startsWith("/")
@@ -377,6 +386,7 @@ object MusicPlayerManager {
         p.setMediaItem(mediaItem)
         p.playWhenReady = true
         p.prepare()
+        ensureMediaServiceStarted()
         showNotification()
         updateWidget()
     }
@@ -493,7 +503,12 @@ object MusicPlayerManager {
 
         ApiManager(ctx).retrieveSongById(targetId, null, object : RequestNetwork.RequestListener {
             override fun onResponse(tag: String?, response: String?, responseHeaders: HashMap<String?, Any?>?) {
-                val songResponse = Gson().fromJson(response, SongResponse::class.java)
+                val songResponse = try {
+                    Gson().fromJson(response, SongResponse::class.java)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to parse song response for $targetId: ${e.message}")
+                    null
+                }
                 if (songResponse != null && songResponse.success && !songResponse.data.isNullOrEmpty()) {
                     CURRENT_TRACK = songResponse
                     val firstSong = songResponse.data[0] ?: return
@@ -568,9 +583,8 @@ object MusicPlayerManager {
                         playTrack()
                         showNotification()
                         updateWidget()
-                        val act = BaseApplicationClass.currentActivity
-                        if (act != null) {
-                            android.widget.Toast.makeText(act, "Autoplay: Playing recommended tracks", android.widget.Toast.LENGTH_SHORT).show()
+                        appContext?.let { toastCtx ->
+                            android.widget.Toast.makeText(toastCtx, "Autoplay: Playing recommended tracks", android.widget.Toast.LENGTH_SHORT).show()
                         }
                     }
                 }

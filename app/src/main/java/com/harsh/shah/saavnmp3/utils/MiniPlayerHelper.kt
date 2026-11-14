@@ -24,6 +24,8 @@ import com.harsh.shah.saavnmp3.network.utility.RequestNetwork
 object MiniPlayerHelper {
     private val handler = Handler(Looper.getMainLooper())
     private var activeActivity: AppCompatActivity? = null
+    private var lastLoadedImageUrl: String? = null
+    private var lastBgColor: Int? = null
     
     private val updateRunnable = object : Runnable {
         override fun run() {
@@ -111,33 +113,40 @@ object MiniPlayerHelper {
         descText?.text = MusicPlayerManager.MUSIC_DESCRIPTION
         
         if (coverImage != null) {
-            if (!MusicPlayerManager.IMAGE_URL.isNullOrBlank()) {
-                try {
-                    Glide.with(coverImage)
-                        .load(MusicPlayerManager.IMAGE_URL)
-                        .placeholder(R.drawable.baseline_album_24)
-                        .error(R.drawable.baseline_album_24)
-                        .into(coverImage)
-                } catch (e: Exception) {
-                    Log.e("MiniPlayerHelper", "Error loading image: ${e.message}")
+            val imageUrl = MusicPlayerManager.IMAGE_URL
+            if (imageUrl != lastLoadedImageUrl || coverImage.drawable == null) {
+                lastLoadedImageUrl = imageUrl
+                if (!imageUrl.isNullOrBlank()) {
+                    try {
+                        Glide.with(coverImage)
+                            .load(imageUrl)
+                            .placeholder(R.drawable.baseline_album_24)
+                            .error(R.drawable.baseline_album_24)
+                            .into(coverImage)
+                    } catch (e: Exception) {
+                        Log.e("MiniPlayerHelper", "Error loading image: ${e.message}")
+                        coverImage.setImageResource(R.drawable.baseline_album_24)
+                    }
+                } else {
                     coverImage.setImageResource(R.drawable.baseline_album_24)
                 }
-            } else {
-                coverImage.setImageResource(R.drawable.baseline_album_24)
             }
         }
-        
+
         val p = MusicPlayerManager.player
         if (p != null && playPauseIcon != null) {
             playPauseIcon.setImageResource(
                 if (MusicPlayerManager.isPlayerPlaying()) R.drawable.baseline_pause_24 else R.drawable.play_arrow_24px
             )
         }
-        
-        val gradientDrawable = GradientDrawable()
-        gradientDrawable.setColor(MusicPlayerManager.IMAGE_BG_COLOR)
-        gradientDrawable.cornerRadius = 20f * activity.resources.displayMetrics.density
-        playBar.background = gradientDrawable
+
+        if (lastBgColor != MusicPlayerManager.IMAGE_BG_COLOR || playBar.background == null) {
+            lastBgColor = MusicPlayerManager.IMAGE_BG_COLOR
+            val gradientDrawable = GradientDrawable()
+            gradientDrawable.setColor(MusicPlayerManager.IMAGE_BG_COLOR)
+            gradientDrawable.cornerRadius = 20f * activity.resources.displayMetrics.density
+            playBar.background = gradientDrawable
+        }
         
         titleText?.setTextColor(MusicPlayerManager.TEXT_ON_IMAGE_COLOR1)
         descText?.setTextColor(MusicPlayerManager.TEXT_ON_IMAGE_COLOR1)
