@@ -70,6 +70,27 @@ To install and run, open the project in Android Studio and select a connected
 device or emulator. Release builds are signed with the debug key unless release
 signing credentials are configured; do not distribute such a build.
 
+## Android Auto & YouTube Playlist Import
+
+### Native Android Auto
+Melotune exposes a Media3 `MediaLibraryService` (`MelotuneMediaLibraryService`) for Android Auto with:
+- Browseable library tree: **Home** (Recently Played, Favorites, Recommended Songs), **Playlists** (User-Created & Imported YouTube Playlists), **Albums**, **Artists**, and **Downloads** (offline playback).
+- Native car-side playback controls, queue management, shuffle/repeat, voice/text catalog search, and synchronized state with the phone UI.
+
+To test with the Android Auto Desktop Head Unit (DHU):
+1. Enable Developer Mode in the Android Auto app on your phone/emulator and start the Head Unit Server.
+2. Forward the DHU port: `adb forward tcp:5277 tcp:5277`.
+3. Launch the DHU (`desktop-head-unit`) and open Melotune from the car media launcher.
+
+### YouTube Public Playlist Import
+Import public YouTube and YouTube Music playlists (`youtube.com/playlist?list=...`, `music.youtube.com/playlist?list=...`, `watch?v=...&list=...`, `youtu.be/...?list=...`) into Melotune's local library with JioSaavn song matching:
+- Uses the official **YouTube Data API v3** (`playlists`, `playlistItems`, `videos`) with full pagination and no audio downloading/scraping.
+- Deterministic, confidence-scored matching (supporting Telugu, Hindi, Tamil, Malayalam, Kannada, and English) with manual candidate review, retry, cancellation, and duplicate handling.
+
+**API Key Configuration (never committed to git):**
+- Option A (Build-time): Add `YOUTUBE_API_KEY=your_key_here` to `local.properties` or set the `YOUTUBE_API_KEY` environment variable before building.
+- Option B (Runtime): Open **Your Library → Import → Import from YouTube** (or **Drawer → Import from YouTube**) and tap **API Key** to save your YouTube Data API v3 key locally.
+
 ## Built With
 
 *   [Java 17](https://openjdk.org/projects/jdk/17/) & [Kotlin](https://kotlinlang.org/) - Programming languages.
