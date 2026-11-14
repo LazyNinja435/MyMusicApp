@@ -741,43 +741,49 @@ class ListActivity : AppCompatActivity() {
                         }
 
                         override fun onTrackProgress(current: Int, total: Int, trackTitle: String) {
-                            if (progressDialog.isShowing) {
+                            if (!isFinishing && !isDestroyed && progressDialog.isShowing) {
                                 progressDialog.setMessage("Downloading ($current/$total):\n$trackTitle")
                             }
                         }
 
                         override fun onAlbumCompleted(downloadedCount: Int, failedCount: Int) {
-                            if (progressDialog.isShowing) {
-                                progressDialog.dismiss()
+                            if (!isFinishing && !isDestroyed) {
+                                if (progressDialog.isShowing) {
+                                    progressDialog.dismiss()
+                                }
+                                Toast.makeText(
+                                    this@ListActivity,
+                                    "Successfully downloaded $downloadedCount tracks into \"Melotune/$title\".",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                updateAlbumDownloadUI()
                             }
-                            Toast.makeText(
-                                this@ListActivity,
-                                "Successfully downloaded $downloadedCount tracks into \"Melotune/$title\".",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                            updateAlbumDownloadUI()
                         }
 
                         override fun onAlbumCancelled() {
-                            if (progressDialog.isShowing) {
-                                progressDialog.dismiss()
+                            if (!isFinishing && !isDestroyed) {
+                                if (progressDialog.isShowing) {
+                                    progressDialog.dismiss()
+                                }
+                                Toast.makeText(this@ListActivity, "$collectionType download cancelled", Toast.LENGTH_SHORT).show()
+                                updateAlbumDownloadUI()
                             }
-                            Toast.makeText(this@ListActivity, "$collectionType download cancelled", Toast.LENGTH_SHORT).show()
-                            updateAlbumDownloadUI()
                         }
 
                         override fun onError(errorMessage: String?) {
-                            if (progressDialog.isShowing) {
-                                progressDialog.dismiss()
+                            if (!isFinishing && !isDestroyed) {
+                                if (progressDialog.isShowing) {
+                                    progressDialog.dismiss()
+                                }
+                                if (errorMessage != "Cancelled") {
+                                    Toast.makeText(
+                                        this@ListActivity,
+                                        "Download error: $errorMessage",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                                updateAlbumDownloadUI()
                             }
-                            if (errorMessage != "Cancelled") {
-                                Toast.makeText(
-                                    this@ListActivity,
-                                    "Download error: $errorMessage",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                            updateAlbumDownloadUI()
                         }
                     }
                 )

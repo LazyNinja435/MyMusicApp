@@ -24,6 +24,7 @@ import com.harsh.shah.saavnmp3.network.ApiManager
 import com.harsh.shah.saavnmp3.records.SongResponse
 import com.harsh.shah.saavnmp3.records.SongResponse.Song
 import com.harsh.shah.saavnmp3.services.DownloadCancelReceiver
+import com.harsh.shah.saavnmp3.services.TrackDownloadService
 import com.samyak.lrclib.LrcLib
 import kotlinx.coroutines.runBlocking
 import org.jaudiotagger.audio.AudioFileIO
@@ -32,6 +33,8 @@ import org.jaudiotagger.tag.images.ArtworkFactory
 import org.jaudiotagger.tag.mp4.field.Mp4TagReverseDnsField
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Collections
 import java.util.concurrent.CancellationException
@@ -45,6 +48,8 @@ object TrackDownloader {
 
     @Volatile
     var isCancelled: Boolean = false
+    @Volatile
+    var isDownloadActive: Boolean = false
     @Volatile
     private var currentDownloadThread: Thread? = null
     private val activeTempFiles = Collections.synchronizedList(mutableListOf<File>())
@@ -323,7 +328,7 @@ object TrackDownloader {
         }
     }
 
-    private fun getCancelPendingIntent(context: Context): PendingIntent {
+    internal fun getCancelPendingIntent(context: Context): PendingIntent {
         val intent = Intent(context, DownloadCancelReceiver::class.java).apply {
             action = ACTION_CANCEL_DOWNLOAD
         }
@@ -404,7 +409,9 @@ object TrackDownloader {
     }
 
     fun cancelDownload(context: Context) {
+        val appContext = context.applicationContext
         isCancelled = true
+        isDownloadActive = false
         try {
             currentDownloadThread?.interrupt()
         } catch (_: Exception) {
@@ -418,10 +425,10 @@ object TrackDownloader {
             }
             activeTempFiles.clear()
         }
-        val notifManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        val notifManager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
         notifManager?.let { mgr ->
-            createDownloadNotificationChannel(context)
-            val notif = NotificationCompat.Builder(context, DOWNLOAD_CHANNEL_ID)
+            createDownloadNotificationChannel(appContext)
+            val notif = NotificationCompat.Builder(appContext, DOWNLOAD_CHANNEL_ID)
                 .setSmallIcon(R.drawable.baseline_download_for_offline_24)
                 .setContentTitle("Download Cancelled")
                 .setContentText("The download was cancelled.")
@@ -434,9 +441,24 @@ object TrackDownloader {
             } catch (_: SecurityException) {
             }
         }
+        TrackDownloadService.stop(appContext)
         Handler(Looper.getMainLooper()).post {
-            Toast.makeText(context, "Download cancelled", Toast.LENGTH_SHORT).show()
+            Toast.makeText(appContext, "Download cancelled", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun openUrlStreamWithTimeout(
+        urlStr: String,
+        connectTimeoutMs: Int = 15_000,
+        readTimeoutMs: Int = 30_000
+    ): InputStream {
+        val conn = URL(urlStr).openConnection()
+        conn.connectTimeout = connectTimeoutMs
+        conn.readTimeout = readTimeoutMs
+        if (conn is HttpURLConnection) {
+            conn.instanceFollowRedirects = true
+        }
+        return conn.getInputStream()
     }
 
     @Throws(Exception::class)
@@ -498,7 +520,7 @@ object TrackDownloader {
 
         try {
             // Step 1: Download raw audio
-            URL(audioUrl).openStream().use { inp ->
+            openUrlStreamWithTimeout(audioUrl).use { inp ->
                 FileOutputStream(tempM4aFile).use { out ->
                     val buffer = ByteArray(8192)
                     var bytesRead: Int
@@ -533,7 +555,7 @@ object TrackDownloader {
             // Step 3: Download artwork
             if (imageUrl.isNotBlank()) {
                 runCatching {
-                    URL(imageUrl).openStream().use { inp ->
+                    openUrlStreamWithTimeout(imageUrl).use { inp ->
                         FileOutputStream(artworkFile).use { out ->
                             val buffer = ByteArray(8192)
                             var bytesRead: Int
@@ -689,16 +711,20 @@ object TrackDownloader {
         subfolder: String? = null,
         listener: TrackDownloadListener
     ) {
+        val appContext = context.applicationContext
         isCancelled = false
+        isDownloadActive = true
+        val title = song.name()
+        TrackDownloadService.start(appContext, "Downloading $title")
+
         val thread = Thread {
             Handler(Looper.getMainLooper()).post { listener.onStarted() }
-            val title = song.name()
             Log.d(TAG, "Downloading [${format.label}] and embedding metadata...")
-            updateDownloadProgressNotification(context, "Downloading $title", "Downloading audio...", 0, 0, true)
+            updateDownloadProgressNotification(appContext, "Downloading $title", "Downloading audio...", 0, 0, true)
 
             try {
-                val success = downloadSingleTrackSync(context, song, format, subfolder) { status ->
-                    updateDownloadProgressNotification(context, "Downloading $title", status, 0, 0, true)
+                val success = downloadSingleTrackSync(appContext, song, format, subfolder) { status ->
+                    updateDownloadProgressNotification(appContext, "Downloading $title", status, 0, 0, true)
                 }
 
                 if (success) {
@@ -707,13 +733,13 @@ object TrackDownloader {
                     } else {
                         "Music/Melotune"
                     }
-                    showDownloadCompletedNotification(context, "Download Complete", "$title saved to $destText")
+                    showDownloadCompletedNotification(appContext, "Download Complete", "$title saved to $destText")
                     Handler(Looper.getMainLooper()).post { listener.onFinished() }
                 } else {
                     if (isCancelled) {
                         Handler(Looper.getMainLooper()).post { listener.onError("Cancelled") }
                     } else {
-                        showDownloadFailedNotification(context, "Download Failed", "Could not complete download")
+                        showDownloadFailedNotification(appContext, "Download Failed", "Could not complete download")
                         Handler(Looper.getMainLooper()).post { listener.onError("Failed to download") }
                     }
                 }
@@ -723,10 +749,12 @@ object TrackDownloader {
             } catch (e: Exception) {
                 Log.e(TAG, "Error downloading track: ${e.message}", e)
                 if (!isCancelled) {
-                    showDownloadFailedNotification(context, "Download Failed", e.message)
+                    showDownloadFailedNotification(appContext, "Download Failed", e.message)
                 }
                 Handler(Looper.getMainLooper()).post { listener.onError(e.message) }
             } finally {
+                isDownloadActive = false
+                TrackDownloadService.stop(appContext)
                 if (currentDownloadThread == Thread.currentThread()) {
                     currentDownloadThread = null
                 }
@@ -743,99 +771,114 @@ object TrackDownloader {
         format: DownloadFormat = DownloadFormat.M4A,
         listener: AlbumDownloadListener? = null
     ) {
+        val appContext = context.applicationContext
         if (songs.isEmpty()) {
             Handler(Looper.getMainLooper()).post {
-                Toast.makeText(context, "No songs to download in collection", Toast.LENGTH_SHORT).show()
+                Toast.makeText(appContext, "No songs to download in collection", Toast.LENGTH_SHORT).show()
                 listener?.onError("Empty songs list")
             }
             return
         }
 
         isCancelled = false
+        isDownloadActive = true
         val safeAlbumFolder = sanitizeFilename(albumTitle).ifBlank { "Collection" }
+        TrackDownloadService.start(appContext, "Downloading: $albumTitle")
 
         val thread = Thread {
-            Handler(Looper.getMainLooper()).post {
-                listener?.onAlbumStarted(songs.size)
-            }
-            val total = songs.size
-            var downloaded = 0
-            var failed = 0
-
-            updateDownloadProgressNotification(
-                context,
-                "Downloading: $albumTitle",
-                "Starting download (0/$total)...",
-                total,
-                0,
-                false
-            )
-
-            for ((index, song) in songs.withIndex()) {
-                if (isCancelled || Thread.currentThread().isInterrupted) {
-                    break
-                }
-                val songTitle = song.name()
+            try {
                 Handler(Looper.getMainLooper()).post {
-                    listener?.onTrackProgress(index + 1, total, songTitle)
+                    listener?.onAlbumStarted(songs.size)
                 }
+                val total = songs.size
+                var downloaded = 0
+                var failed = 0
+
                 updateDownloadProgressNotification(
-                    context,
-                    "Downloading: $albumTitle (${index + 1}/$total)",
-                    songTitle,
+                    appContext,
+                    "Downloading: $albumTitle",
+                    "Starting download (0/$total)...",
                     total,
-                    index,
+                    0,
                     false
                 )
 
-                try {
-                    if (isAlreadyDownloaded(songTitle, safeAlbumFolder)) {
-                        downloaded++
-                        continue
+                for ((index, song) in songs.withIndex()) {
+                    if (isCancelled || Thread.currentThread().isInterrupted) {
+                        break
                     }
-                    val success = downloadSingleTrackSync(
-                        context = context,
-                        song = song,
-                        format = format,
-                        subfolder = safeAlbumFolder
+                    val songTitle = song.name()
+                    Handler(Looper.getMainLooper()).post {
+                        listener?.onTrackProgress(index + 1, total, songTitle)
+                    }
+                    updateDownloadProgressNotification(
+                        appContext,
+                        "Downloading: $albumTitle (${index + 1}/$total)",
+                        songTitle,
+                        total,
+                        index,
+                        false
                     )
-                    if (success) {
-                        downloaded++
-                    } else {
+
+                    try {
+                        if (isAlreadyDownloaded(songTitle, safeAlbumFolder)) {
+                            downloaded++
+                            continue
+                        }
+                        val success = downloadSingleTrackSync(
+                            context = appContext,
+                            song = song,
+                            format = format,
+                            subfolder = safeAlbumFolder
+                        )
+                        if (success) {
+                            downloaded++
+                        } else {
+                            failed++
+                        }
+                    } catch (e: CancellationException) {
+                        Log.d(TAG, "Collection download cancelled at track: $songTitle")
+                        break
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed downloading track $songTitle in collection: ${e.message}")
                         failed++
                     }
-                } catch (e: CancellationException) {
-                    Log.d(TAG, "Collection download cancelled at track: $songTitle")
-                    break
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed downloading track $songTitle in collection: ${e.message}")
-                    failed++
                 }
-            }
 
-            if (isCancelled) {
-                cancelDownload(context)
-                Handler(Looper.getMainLooper()).post {
-                    listener?.onAlbumCancelled()
+                if (isCancelled) {
+                    cancelDownload(appContext)
+                    Handler(Looper.getMainLooper()).post {
+                        listener?.onAlbumCancelled()
+                    }
+                } else {
+                    showDownloadCompletedNotification(
+                        appContext,
+                        "Download Complete",
+                        "$albumTitle: $downloaded downloaded to Melotune/$safeAlbumFolder" + if (failed > 0) ", $failed failed" else ""
+                    )
+                    Handler(Looper.getMainLooper()).post {
+                        listener?.onAlbumCompleted(downloaded, failed)
+                        Toast.makeText(
+                            appContext,
+                            "\"$albumTitle\" downloaded to Melotune/$safeAlbumFolder ($downloaded/$total songs)",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                 }
-            } else {
-                showDownloadCompletedNotification(
-                    context,
-                    "Download Complete",
-                    "$albumTitle: $downloaded downloaded to Melotune/$safeAlbumFolder" + if (failed > 0) ", $failed failed" else ""
-                )
-                Handler(Looper.getMainLooper()).post {
-                    listener?.onAlbumCompleted(downloaded, failed)
-                    Toast.makeText(
-                        context,
-                        "\"$albumTitle\" downloaded to Melotune/$safeAlbumFolder ($downloaded/$total songs)",
-                        Toast.LENGTH_LONG
-                    ).show()
+            } catch (e: Exception) {
+                Log.e(TAG, "Album download failed unexpectedly: ${e.message}", e)
+                if (!isCancelled) {
+                    showDownloadFailedNotification(appContext, "Download Failed", e.message)
                 }
-            }
-
-            if (currentDownloadThread == Thread.currentThread()) {
-                currentDownloadThread = null
+                Handler(Looper.getMainLooper()).post {
+                    listener?.onError(e.message)
+                }
+            } finally {
+                isDownloadActive = false
+                TrackDownloadService.stop(appContext)
+                if (currentDownloadThread == Thread.currentThread()) {
+                    currentDownloadThread = null
+                }
             }
         }
         currentDownloadThread = thread
