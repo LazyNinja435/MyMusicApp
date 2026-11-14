@@ -31,6 +31,10 @@
         android:usesCleartextTraffic="true"
         tools:targetApi="31">
 
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+
         <activity
             android:name=".activities.DeepLinkingActivity"
             android:exported="true">
@@ -65,6 +69,9 @@
             android:name=".activities.SavedLibrariesActivity"
             android:exported="false" />
         <activity
+            android:name=".activities.PlaylistImportActivity"
+            android:exported="false" />
+        <activity
             android:name=".activities.SeeMoreActivity"
             android:exported="false" />
         <activity
@@ -96,7 +103,19 @@
         <service
             android:name=".services.MusicService"
             android:enabled="true"
+            android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <service
+            android:name=".services.MelotuneMediaLibraryService"
+            android:enabled="true"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaLibraryService" />
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
 
         <receiver
             android:name=".services.NotificationReceiver"

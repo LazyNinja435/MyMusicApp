@@ -16,6 +16,16 @@ android {
         versionName '1.0.22'
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // Read optional YouTube Data API v3 key from local.properties or environment variable
+        def localProps = new Properties()
+        def localPropsFile = rootProject.file("local.properties")
+        if (localPropsFile.exists()) {
+            localPropsFile.withInputStream { localProps.load(it) }
+        }
+        def youtubeApiKey = localProps.getProperty("YOUTUBE_API_KEY") ?: System.getenv("YOUTUBE_API_KEY") ?: ""
+        def escapedYoutubeKey = youtubeApiKey.replace("\\", "\\\\").replace("\"", "\\\"")
+        buildConfigField "String", "YOUTUBE_API_KEY", "\"${escapedYoutubeKey}\""
+
         //Universal APK Supporting All ABIs
         ndk {
             abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
@@ -63,6 +73,12 @@ android {
         jvmTarget = '17'
     }
 
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+        }
+    }
+
     packaging {
         jniLibs {
             // Avoid duplicate native library conflicts from ffmpeg-kit
@@ -90,6 +106,10 @@ dependencies {
     implementation libs.core.ktx
 
     testImplementation libs.junit
+    testImplementation libs.robolectric
+    testImplementation libs.mockwebserver
+    testImplementation libs.androidx.test.core
+    testImplementation libs.kotlinx.coroutines.test
     androidTestImplementation libs.ext.junit
     androidTestImplementation libs.espresso.core
 

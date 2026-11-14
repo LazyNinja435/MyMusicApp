@@ -2,25 +2,21 @@ package com.harsh.shah.saavnmp3.utils
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.os.PowerManager
-import android.support.v4.media.MediaMetadataCompat
-import android.support.v4.media.session.MediaSessionCompat
-import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
 import androidx.annotation.OptIn
-import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -42,12 +38,13 @@ import com.harsh.shah.saavnmp3.activities.MusicOverviewActivity
 import com.harsh.shah.saavnmp3.network.ApiManager
 import com.harsh.shah.saavnmp3.network.utility.RequestNetwork
 import com.harsh.shah.saavnmp3.records.SongResponse
-import com.harsh.shah.saavnmp3.services.NotificationReceiver
+import com.harsh.shah.saavnmp3.services.MelotuneMediaLibraryService
 import com.harsh.shah.saavnmp3.widgets.WidgetPlayerProvider
 import com.bumptech.glide.Glide
 import com.bumptech.glide.request.target.CustomTarget
 import com.bumptech.glide.request.transition.Transition
 import java.io.File
+import java.util.concurrent.CopyOnWriteArraySet
 
 @OptIn(UnstableApi::class)
 object MusicPlayerManager {
@@ -61,8 +58,31 @@ object MusicPlayerManager {
     var CURRENT_TRACK: SongResponse? = null
     var player: ExoPlayer? = null
     var musicService: com.harsh.shah.saavnmp3.services.MusicService? = null
-    private var mediaSession: MediaSessionCompat? = null
     var latestNotification: android.app.Notification? = null
+
+    interface PlaybackListener {
+        fun onPlaybackStateUpdated()
+    }
+
+    private val playbackListeners = CopyOnWriteArraySet<PlaybackListener>()
+
+    fun addPlaybackListener(listener: PlaybackListener) {
+        playbackListeners.add(listener)
+    }
+
+    fun removePlaybackListener(listener: PlaybackListener) {
+        playbackListeners.remove(listener)
+    }
+
+    private fun notifyPlaybackListeners() {
+        for (listener in playbackListeners) {
+            try {
+                listener.onPlaybackStateUpdated()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error notifying playback listener: ${e.message}")
+            }
+        }
+    }
 
     var TRACK_QUALITY: String? = "320kbps"
     var isTrackDownloaded: Boolean = false
@@ -190,21 +210,6 @@ object MusicPlayerManager {
             }
         })
 
-        mediaSession = MediaSessionCompat(appContext!!, TAG).apply {
-            setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS)
-            setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() { togglePlayPause() }
-                override fun onPause() { togglePlayPause() }
-                override fun onSkipToNext() { nextTrack() }
-                override fun onSkipToPrevious() { prevTrack() }
-                override fun onSeekTo(pos: Long) {
-                    player?.seekTo(pos)
-                    showNotification()
-                }
-            })
-            isActive = true
-        }
-
         createNotificationChannel()
     }
 
@@ -290,110 +295,20 @@ object MusicPlayerManager {
         return if (lastUrl.startsWith("http:")) lastUrl.replace("http:", "https:") else lastUrl
     }
 
-    fun showNotification(playPauseButton: Int = if (isPlayerPlaying()) R.drawable.baseline_pause_24 else R.drawable.play_arrow_24px) {
+    private fun ensureMediaServiceStarted() {
         val ctx = appContext ?: return
-        if (MUSIC_ID.isNullOrEmpty() || MUSIC_TITLE.isNullOrEmpty() || IMAGE_URL.isNullOrEmpty()) return
-
-        val position = player?.currentPosition ?: 0
-        val state = PlaybackStateCompat.Builder()
-            .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or
-                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                        PlaybackStateCompat.ACTION_SEEK_TO)
-            .setState(if (playPauseButton == R.drawable.play_arrow_24px) PlaybackStateCompat.STATE_PAUSED else PlaybackStateCompat.STATE_PLAYING, position, 1.0f)
-            .build()
-        mediaSession?.setPlaybackState(state)
-
-        val duration = if (player?.duration != null && player!!.duration > 0) player!!.duration else -1L
-        val metadata = MediaMetadataCompat.Builder()
-            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, MUSIC_TITLE)
-            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, MUSIC_DESCRIPTION)
-            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration)
-            .build()
-        mediaSession?.setMetadata(metadata)
-
-        val reqCode = MUSIC_ID.hashCode()
-        val intent = Intent(ctx, MusicOverviewActivity::class.java).apply {
-            putExtra("id", MUSIC_ID)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        if (MelotuneMediaLibraryService.isRunning) return
+        try {
+            val intent = Intent(ctx, MelotuneMediaLibraryService::class.java)
+            ContextCompat.startForegroundService(ctx, intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to start MelotuneMediaLibraryService: ${e.message}")
         }
-        val contentIntent = PendingIntent.getActivity(ctx, reqCode, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-
-        val prevIntent = PendingIntent.getBroadcast(ctx, 0, Intent(ctx, NotificationReceiver::class.java).setAction(ACTION_PREV), PendingIntent.FLAG_IMMUTABLE)
-        val playIntent = PendingIntent.getBroadcast(ctx, 0, Intent(ctx, NotificationReceiver::class.java).setAction(ACTION_PLAY), PendingIntent.FLAG_IMMUTABLE)
-        val nextIntent = PendingIntent.getBroadcast(ctx, 0, Intent(ctx, NotificationReceiver::class.java).setAction(ACTION_NEXT), PendingIntent.FLAG_IMMUTABLE)
-
-        val builder = NotificationCompat.Builder(ctx, CHANNEL_ID_1)
-            .setSmallIcon(R.drawable.headphone)
-            .setContentTitle(MUSIC_TITLE)
-            .setOngoing(playPauseButton != R.drawable.play_arrow_24px)
-            .setContentText(MUSIC_DESCRIPTION)
-            .setStyle(androidx.media.app.NotificationCompat.MediaStyle().setMediaSession(mediaSession?.sessionToken).setShowActionsInCompactView(0, 1, 2))
-            .addAction(R.drawable.skip_previous_24px, "prev", prevIntent)
-            .addAction(playPauseButton, "play", playIntent)
-            .addAction(R.drawable.skip_next_24px, "next", nextIntent)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setContentIntent(contentIntent)
-            .setOnlyAlertOnce(true)
-
-        Glide.with(ctx.applicationContext)
-            .asBitmap()
-            .load(IMAGE_URL)
-            .into(object : CustomTarget<Bitmap>() {
-                override fun onResourceReady(bitmap: Bitmap, transition: Transition<in Bitmap>?) {
-                    try {
-                        Palette.from(bitmap).generate { palette ->
-                            val textSwatch = palette?.dominantSwatch
-                            if (textSwatch != null) {
-                                IMAGE_BG_COLOR = textSwatch.rgb
-                                TEXT_ON_IMAGE_COLOR = textSwatch.titleTextColor
-                                TEXT_ON_IMAGE_COLOR1 = textSwatch.bodyTextColor
-                            }
-                        }
-                        val metadataWithArt = MediaMetadataCompat.Builder()
-                            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, MUSIC_TITLE)
-                            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, MUSIC_DESCRIPTION)
-                            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration)
-                            .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bitmap)
-                            .putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, bitmap)
-                            .build()
-                        mediaSession?.setMetadata(metadataWithArt)
-
-                        builder.setLargeIcon(bitmap)
-                        showBasicNotification(builder, playPauseButton != R.drawable.play_arrow_24px)
-                    } catch (e: Exception) {
-                        showBasicNotification(builder, playPauseButton != R.drawable.play_arrow_24px)
-                    }
-                }
-                override fun onLoadCleared(placeholder: android.graphics.drawable.Drawable?) {}
-                override fun onLoadFailed(errorDrawable: android.graphics.drawable.Drawable?) {
-                    showBasicNotification(builder, playPauseButton != R.drawable.play_arrow_24px)
-                }
-            })
     }
 
-    private fun showBasicNotification(builder: NotificationCompat.Builder, isPlaying: Boolean) {
-        val notification = builder.build()
-        latestNotification = notification
-        if (isPlaying) {
-            try {
-                val intent = Intent(appContext, com.harsh.shah.saavnmp3.services.MusicService::class.java)
-                androidx.core.content.ContextCompat.startForegroundService(
-                    appContext!!,
-                    intent
-                )
-                musicService?.startForeground(1, notification)
-            } catch (e: Exception) {
-                val manager = appContext?.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                manager?.notify(1, notification)
-            }
-        } else {
-            if (!isTransitioning) {
-                try { musicService?.stopForeground(false) } catch (e: Exception) {}
-            }
-            val manager = appContext?.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-            manager?.notify(1, notification)
-        }
+    fun showNotification(playPauseButton: Int = if (isPlayerPlaying()) R.drawable.baseline_pause_24 else R.drawable.play_arrow_24px) {
         updateWidget()
+        notifyPlaybackListeners()
     }
 
     fun isPlayerPlaying(): Boolean {
@@ -426,18 +341,74 @@ object MusicPlayerManager {
         p.clearMediaItems()
         if (SONG_URL.isNullOrEmpty()) return
         acquireWakeLock(15000L)
+        ensureMediaServiceStarted()
 
         var finalUrl = SONG_URL ?: ""
-        if (finalUrl.startsWith("http:")) finalUrl = finalUrl.replace("http:", "https:")
+        val isLocalFile = finalUrl.startsWith("file://") || finalUrl.startsWith("/")
+        if (!isLocalFile && finalUrl.startsWith("http:")) {
+            finalUrl = finalUrl.replace("http:", "https:")
+        }
+        val mediaUri = if (finalUrl.startsWith("/")) Uri.fromFile(File(finalUrl)) else Uri.parse(finalUrl)
 
-        val mediaItem = MediaItem.Builder().setUri(finalUrl).setMediaId(SONG_URL ?: "").build()
-        isTrackDownloaded = false
+        val currentSong = CURRENT_TRACK?.data?.firstOrNull()
+        val artistText = currentSong?.artists?.primary?.mapNotNull { it?.name() }?.joinToString(", ")
+            ?.takeIf { it.isNotBlank() } ?: MUSIC_DESCRIPTION
+        val albumText = currentSong?.album?.name()?.takeIf { it.isNotBlank() }
+        val artworkUri = IMAGE_URL?.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
+
+        val metadata = MediaMetadata.Builder()
+            .setTitle(MUSIC_TITLE ?: "Melotune")
+            .setArtist(artistText ?: "Melotune")
+            .setAlbumTitle(albumText)
+            .setArtworkUri(artworkUri)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .build()
+
+        val mediaItem = MediaItem.Builder()
+            .setUri(mediaUri)
+            .setMediaId(MUSIC_ID ?: finalUrl)
+            .setMediaMetadata(metadata)
+            .build()
+
+        isTrackDownloaded = isLocalFile
         currentlyPlayingTrackId = MUSIC_ID
         p.setMediaItem(mediaItem)
         p.playWhenReady = true
         p.prepare()
         showNotification()
         updateWidget()
+    }
+
+    fun playFromQueue(songIds: List<String>, startIndex: Int = 0) {
+        if (songIds.isEmpty()) return
+        cancelAutoplay()
+        val safeIndex = startIndex.coerceIn(0, songIds.lastIndex)
+        trackQueue = ArrayList(songIds)
+        track_position = safeIndex
+        MUSIC_ID = songIds[safeIndex]
+        playTrack()
+    }
+
+    fun playLocalFile(
+        filePath: String,
+        title: String,
+        artist: String,
+        album: String? = null,
+        trackUid: String? = null
+    ) {
+        val file = File(filePath)
+        if (!file.exists()) return
+        cancelAutoplay()
+        MUSIC_ID = trackUid ?: filePath
+        MUSIC_TITLE = title
+        MUSIC_DESCRIPTION = artist
+        SONG_URL = file.absolutePath
+        IMAGE_URL = ""
+        CURRENT_TRACK = null
+        setMusicDetails(IMAGE_URL, MUSIC_TITLE, album?.takeIf { it.isNotBlank() } ?: artist, MUSIC_ID)
+        prepareMediaPlayer()
     }
 
     fun playNext(trackId: String?) {
@@ -479,6 +450,31 @@ object MusicPlayerManager {
         updateWidget()
     }
 
+    private fun tryPlayOfflineMatch(ctx: Context, trackId: String): Boolean {
+        return try {
+            val downloaded = TrackDownloader.getDownloadedTracks(ctx).filterNotNull()
+            val match = downloaded.firstOrNull { it.trackUID == trackId || it.file?.absolutePath == trackId }
+            val file = match?.file
+            if (match != null && file != null && file.exists()) {
+                playLocalFile(
+                    filePath = file.absolutePath,
+                    title = match.title ?: "Downloaded Track",
+                    artist = match.artist ?: "Unknown Artist",
+                    album = match.album,
+                    trackUid = match.trackUID ?: trackId
+                )
+                isTransitioning = false
+                releaseWakeLock()
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Offline match lookup failed: ${e.message}")
+            false
+        }
+    }
+
     fun playTrack() {
         if (MUSIC_ID.isNullOrEmpty()) {
             isTransitioning = false
@@ -490,10 +486,15 @@ object MusicPlayerManager {
         acquireWakeLock(30000L)
 
         val ctx = BaseApplicationClass.currentActivity ?: appContext ?: return
-        ApiManager(ctx).retrieveSongById(MUSIC_ID!!, null, object : RequestNetwork.RequestListener {
+        val targetId = MUSIC_ID!!
+        if (targetId.startsWith("/") || targetId.startsWith("file://")) {
+            if (tryPlayOfflineMatch(ctx, targetId)) return
+        }
+
+        ApiManager(ctx).retrieveSongById(targetId, null, object : RequestNetwork.RequestListener {
             override fun onResponse(tag: String?, response: String?, responseHeaders: HashMap<String?, Any?>?) {
                 val songResponse = Gson().fromJson(response, SongResponse::class.java)
-                if (songResponse.success && !songResponse.data.isNullOrEmpty()) {
+                if (songResponse != null && songResponse.success && !songResponse.data.isNullOrEmpty()) {
                     CURRENT_TRACK = songResponse
                     val firstSong = songResponse.data[0] ?: return
                     MUSIC_TITLE = firstSong.name()
@@ -517,13 +518,17 @@ object MusicPlayerManager {
                         artistName = primaryArtist?.name()
                     )
                 } else {
-                    isTransitioning = false
-                    releaseWakeLock()
+                    if (!tryPlayOfflineMatch(ctx, targetId)) {
+                        isTransitioning = false
+                        releaseWakeLock()
+                    }
                 }
             }
             override fun onErrorResponse(tag: String?, message: String?) {
-                isTransitioning = false
-                releaseWakeLock()
+                if (!tryPlayOfflineMatch(ctx, targetId)) {
+                    isTransitioning = false
+                    releaseWakeLock()
+                }
             }
         })
     }

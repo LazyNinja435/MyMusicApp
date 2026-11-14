@@ -677,11 +677,27 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
         return materialAlertDialogBuilder
     }
 
+    private val playerSyncListener = object : MusicPlayerManager.PlaybackListener {
+        override fun onPlaybackStateUpdated() {
+            runOnUiThread {
+                if (isFinishing || isDestroyed || binding == null) return@runOnUiThread
+                updateTrackInfo()
+                updateSeekbar()
+                if (MusicPlayerManager.isPlayerPlaying()) {
+                    binding!!.playPauseImage.setImageResource(R.drawable.baseline_pause_24)
+                } else {
+                    binding!!.playPauseImage.setImageResource(R.drawable.play_arrow_24px)
+                }
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
 
         // Set as current activity in ApplicationClass
         BaseApplicationClass.currentActivity = this
+        MusicPlayerManager.addPlaybackListener(playerSyncListener)
 
         // Bind to the service
         val intent = Intent(this, MusicService::class.java)
@@ -696,6 +712,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
 
     override fun onPause() {
         super.onPause()
+        MusicPlayerManager.removePlaybackListener(playerSyncListener)
 
         // Remove callbacks to prevent leaks
         handler.removeCallbacks(runnable)

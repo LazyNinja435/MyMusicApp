@@ -35,16 +35,6 @@ class MusicService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notification = MusicPlayerManager.latestNotification
-
-        if (notification != null) {
-            try {
-                startForeground(1, notification)
-            } catch (e: Exception) {
-                Log.e("MusicService", "Error starting foreground", e)
-            }
-        }
-
         if (intent == null || intent.extras == null) return START_STICKY
 
         val actionName = intent.extras!!.getString("action", "")
