@@ -462,6 +462,46 @@ class SharedPreferenceManager private constructor(context: Context) {
             putJson(KEY_LAST_ARTIST_NAME, gson.toJson(value))
         }
 
+    // ---------- YouTube Imported Playlists Metadata ----------
+    fun markYouTubeImportedPlaylist(libraryId: String, sourceUrl: String, youtubePlaylistId: String) {
+        val map = getYouTubeImportedPlaylistMap().toMutableMap()
+        map[libraryId] = mapOf(
+            "sourceUrl" to sourceUrl,
+            "youtubePlaylistId" to youtubePlaylistId,
+            "importedAt" to System.currentTimeMillis().toString()
+        )
+        putJson(KEY_YT_IMPORTED_PLAYLISTS, gson.toJson(map))
+    }
+
+    fun isYouTubeImportedPlaylist(libraryId: String?): Boolean {
+        if (libraryId.isNullOrBlank()) return false
+        if (libraryId.startsWith("yt_import_")) return true
+        return getYouTubeImportedPlaylistMap().containsKey(libraryId)
+    }
+
+    fun getYouTubeImportedPlaylistMap(): Map<String, Map<String, String>> {
+        val json = getJson(KEY_YT_IMPORTED_PLAYLISTS)
+        if (json.isNullOrEmpty()) return emptyMap()
+        return try {
+            val type = object : com.google.gson.reflect.TypeToken<Map<String, Map<String, String>>>() {}.type
+            gson.fromJson(json, type) ?: emptyMap()
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    fun saveYouTubeImportCheckpoint(json: String?) {
+        if (json.isNullOrEmpty()) {
+            removeKey(KEY_YT_IMPORT_CHECKPOINT)
+        } else {
+            putJson(KEY_YT_IMPORT_CHECKPOINT, json)
+        }
+    }
+
+    fun getYouTubeImportCheckpoint(): String? {
+        return getJson(KEY_YT_IMPORT_CHECKPOINT)
+    }
+
     // ---------- Migration helpers for one-time migration ----------
     /**
      * Migrate all entries from the old SharedPreferences named "cache" into Room.
@@ -515,6 +555,8 @@ class SharedPreferenceManager private constructor(context: Context) {
         private const val KEY_AUTOPLAY = "autoplay_recommendations"
         private const val KEY_LAST_ARTIST_ID = "last_played_artist_id"
         private const val KEY_LAST_ARTIST_NAME = "last_played_artist_name"
+        private const val KEY_YT_IMPORTED_PLAYLISTS = "yt_imported_playlists_meta"
+        private const val KEY_YT_IMPORT_CHECKPOINT = "yt_import_checkpoint"
 
         fun getInstance(context: Context): SharedPreferenceManager {
             if (instance == null) instance = SharedPreferenceManager(context)

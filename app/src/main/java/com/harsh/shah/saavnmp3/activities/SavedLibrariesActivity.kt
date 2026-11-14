@@ -4,12 +4,14 @@ import android.annotation.SuppressLint
 import android.os.Bundle
 import android.util.Log
 import android.view.View
+import android.content.Intent
 import android.content.res.Configuration
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.harsh.shah.saavnmp3.R
 import com.harsh.shah.saavnmp3.adapters.SavedLibrariesAdapter
@@ -179,7 +181,16 @@ class SavedLibrariesActivity : AppCompatActivity() {
         })
 
         binding?.importLibrary?.setOnClickListener {
-            importLauncher.launch(arrayOf("application/json"))
+            val options = arrayOf("Import from YouTube", "Import Library Backup (JSON)")
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Import Playlist or Library")
+                .setItems(options) { _, which ->
+                    when (which) {
+                        0 -> startActivity(Intent(this, PlaylistImportActivity::class.java))
+                        1 -> importLauncher.launch(arrayOf("application/json"))
+                    }
+                }
+                .show()
         }
 
         binding?.exportLibrary?.setOnClickListener {

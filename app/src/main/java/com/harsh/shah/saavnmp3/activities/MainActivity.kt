@@ -317,6 +317,11 @@ class MainActivity : AppCompatActivity() {
             slidingRootNavBuilder!!.closeMenu()
         }
 
+        slidingRootNavBuilder!!.layout.findViewById<View>(R.id.import_youtube).setOnClickListener {
+            startActivity(Intent(this@MainActivity, PlaylistImportActivity::class.java))
+            slidingRootNavBuilder!!.closeMenu()
+        }
+
         slidingRootNavBuilder!!.layout.findViewById<View>(R.id.about)
             .setOnClickListener {
                 startActivity(Intent(this@MainActivity, AboutActivity::class.java))
