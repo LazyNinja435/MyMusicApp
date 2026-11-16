@@ -26,6 +26,7 @@ import com.harsh.shah.saavnmp3.automotive.AutoTrackItem
 import com.harsh.shah.saavnmp3.automotive.MediaLibraryBrowser
 import com.harsh.shah.saavnmp3.automotive.MediaLibraryRepository
 import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
+import com.harsh.shah.saavnmp3.utils.QueueTrack
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -151,14 +152,13 @@ class MelotuneMediaLibraryService : MediaLibraryService() {
         }
 
         override fun hasNextMediaItem(): Boolean {
-            val queue = MusicPlayerManager.trackQueue
-            if (!queue.isNullOrEmpty() && MusicPlayerManager.track_position < queue.size - 1) return true
+            if (MusicPlayerManager.hasNextQueuedTrack) return true
             if (repeatMode == REPEAT_MODE_ALL || repeatMode == REPEAT_MODE_ONE) return true
             return super.hasNextMediaItem()
         }
 
         override fun hasPreviousMediaItem(): Boolean {
-            if (!MusicPlayerManager.trackQueue.isNullOrEmpty() || currentPosition > 3000L) return true
+            if (MusicPlayerManager.queueEntries.isNotEmpty() || currentPosition > 3000L) return true
             return super.hasPreviousMediaItem()
         }
 
@@ -337,9 +337,9 @@ class MelotuneMediaLibraryService : MediaLibraryService() {
         ): MediaSession.MediaItemsWithStartPosition {
             val selected = tracks.getOrNull(index)
                 ?: throw IllegalArgumentException("No tracks available")
-            val queueIds = tracks.map { it.localFilePath ?: it.id }
+            val queueTracks = tracks.map { QueueTrack(it.localFilePath ?: it.id, it.title, it.artist, it.artworkUrl) }
             val item = MusicPlayerManager.resolveMediaItem(
-                queueIds[index], queueIds, index, selected.takeIf { it.localFilePath != null }
+                queueTracks[index].id, queueTracks, index, selected.takeIf { it.localFilePath != null }
             ) ?: throw IllegalArgumentException("No playable source for ${selected.id}")
             return MediaSession.MediaItemsWithStartPosition(listOf(item), 0, startPositionMs)
         }

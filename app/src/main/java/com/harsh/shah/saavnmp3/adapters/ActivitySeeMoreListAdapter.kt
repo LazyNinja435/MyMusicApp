@@ -11,6 +11,7 @@ import com.harsh.shah.saavnmp3.R
 import com.harsh.shah.saavnmp3.activities.MusicOverviewActivity
 import com.harsh.shah.saavnmp3.records.SongResponse.Song
 import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
+import com.harsh.shah.saavnmp3.utils.toQueueTrack
 import com.bumptech.glide.Glide
 import androidx.core.net.toUri
 
@@ -68,29 +69,15 @@ class ActivitySeeMoreListAdapter : RecyclerView.Adapter<ActivitySeeMoreListAdapt
         }
 
         holder.itemView.setOnClickListener { view: View? ->
-            MusicPlayerManager.cancelAutoplay()
-            MusicPlayerManager.trackQueue?.clear()
-            val songId = data?.getOrNull(position)?.id
-            var clickIndex = position
-            var validIndex = 0
-            if (data != null) {
-                for (i in data.indices) {
-                    val song = data[i]
-                    if (song != null && song.id != null && song.id != "<shimmer>") {
-                        MusicPlayerManager.trackQueue?.add(song.id)
-                        if (i == position) {
-                            clickIndex = validIndex
-                        }
-                        validIndex++
-                    }
-                }
-            }
-            MusicPlayerManager.track_position = clickIndex
+            val selected = holder.bindingAdapterPosition
+            if (selected == RecyclerView.NO_POSITION) return@setOnClickListener
+            val id = MusicPlayerManager.setQueue(data.orEmpty().map { it?.toQueueTrack() }, selected)
+                ?: return@setOnClickListener
             view!!.context.startActivity(
                 Intent(
                     view.context,
                     MusicOverviewActivity::class.java
-                ).putExtra("id", data!![position]!!.id)
+                ).putExtra("id", id)
             )
         }
     }

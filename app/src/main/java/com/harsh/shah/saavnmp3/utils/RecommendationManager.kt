@@ -27,6 +27,7 @@ object RecommendationManager {
         context: Context,
         song: SongResponse.Song,
         limit: Int = 15,
+        queuedTracks: Map<String, String> = emptyMap(),
         callback: (List<SongResponse.Song>) -> Unit
     ) {
         val songId = song.id ?: run {
@@ -35,25 +36,29 @@ object RecommendationManager {
         }
 
         val apiManager = ApiManager(context)
+        val pool = mutableListOf<SongResponse.Song?>()
+        val collect = { candidates: List<SongResponse.Song?>?, lastSource: Boolean ->
+            pool.addAll(candidates.orEmpty())
+            val unique = uniqueSongRecommendations(pool, song, queuedTracks, limit)
+            val finished = lastSource || unique.size == limit
+            if (finished) mainHandler.post { callback(unique) }
+            finished
+        }
 
         // Step 1: Try song suggestions API
-        apiManager.retrieveSongSuggestions(songId, limit, object : RequestNetwork.RequestListener {
+        apiManager.retrieveSongSuggestions(songId, limit + 5, object : RequestNetwork.RequestListener {
             override fun onResponse(tag: String?, response: String?, responseHeaders: HashMap<String?, Any?>?) {
                 try {
                     val songResponse = Gson().fromJson(response, SongResponse::class.java)
-                    val suggestions = songResponse?.data?.filterNotNull()?.filter { it.id != songId }
-                    if (songResponse?.success == true && !suggestions.isNullOrEmpty()) {
-                        mainHandler.post { callback(suggestions.take(limit)) }
-                        return
-                    }
+                    if (collect(songResponse?.data?.takeIf { songResponse.success }, false)) return
                 } catch (e: Exception) {
                     Log.w(TAG, "Song suggestions parsing failed: ${e.message}")
                 }
-                fallbackToArtistTopSongs(apiManager, song, limit, callback)
+                fallbackToArtistTopSongs(apiManager, song, limit, collect)
             }
 
             override fun onErrorResponse(tag: String?, message: String?) {
-                fallbackToArtistTopSongs(apiManager, song, limit, callback)
+                fallbackToArtistTopSongs(apiManager, song, limit, collect)
             }
         })
     }
@@ -62,7 +67,7 @@ object RecommendationManager {
         apiManager: ApiManager,
         song: SongResponse.Song,
         limit: Int,
-        callback: (List<SongResponse.Song>) -> Unit
+        collect: (List<SongResponse.Song?>?, Boolean) -> Boolean
     ) {
         val primaryArtist = song.artists?.primary?.firstOrNull()
         val artistId = primaryArtist?.id
@@ -72,23 +77,19 @@ object RecommendationManager {
                 override fun onResponse(tag: String?, response: String?, responseHeaders: HashMap<String?, Any?>?) {
                     try {
                         val artistSongs = Gson().fromJson(response, ArtistAllSongs::class.java)
-                        val songs = artistSongs?.data?.songs?.filterNotNull()?.filter { it.id != song.id }
-                        if (artistSongs?.success == true && !songs.isNullOrEmpty()) {
-                            mainHandler.post { callback(songs.take(limit)) }
-                            return
-                        }
+                        if (collect(artistSongs?.data?.songs?.takeIf { artistSongs.success }, false)) return
                     } catch (e: Exception) {
                         Log.w(TAG, "Artist top songs parsing failed: ${e.message}")
                     }
-                    fallbackToSearch(apiManager, song, limit, callback)
+                    fallbackToSearch(apiManager, song, limit, collect)
                 }
 
                 override fun onErrorResponse(tag: String?, message: String?) {
-                    fallbackToSearch(apiManager, song, limit, callback)
+                    fallbackToSearch(apiManager, song, limit, collect)
                 }
             })
         } else {
-            fallbackToSearch(apiManager, song, limit, callback)
+            fallbackToSearch(apiManager, song, limit, collect)
         }
     }
 
@@ -96,7 +97,7 @@ object RecommendationManager {
         apiManager: ApiManager,
         song: SongResponse.Song,
         limit: Int,
-        callback: (List<SongResponse.Song>) -> Unit
+        collect: (List<SongResponse.Song?>?, Boolean) -> Boolean
     ) {
         val query = song.artists?.primary?.firstOrNull()?.name()
             ?: song.language
@@ -104,21 +105,18 @@ object RecommendationManager {
 
         apiManager.searchSongs(query, 0, limit + 5, object : RequestNetwork.RequestListener {
             override fun onResponse(tag: String?, response: String?, responseHeaders: HashMap<String?, Any?>?) {
-                try {
+                val candidates = try {
                     val searchResult = Gson().fromJson(response, SongSearch::class.java)
-                    val songs = searchResult?.data?.results?.filterNotNull()?.filter { it.id != song.id }
-                    if (searchResult?.success == true && !songs.isNullOrEmpty()) {
-                        mainHandler.post { callback(songs.take(limit)) }
-                        return
-                    }
+                    searchResult?.data?.results?.takeIf { searchResult.success }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Search fallback failed: ${e.message}")
+                    Log.w(TAG, "Search fallback failed: ${e.message}")
+                    null
                 }
-                mainHandler.post { callback(emptyList()) }
+                collect(candidates, true)
             }
 
             override fun onErrorResponse(tag: String?, message: String?) {
-                mainHandler.post { callback(emptyList()) }
+                collect(null, true)
             }
         })
     }

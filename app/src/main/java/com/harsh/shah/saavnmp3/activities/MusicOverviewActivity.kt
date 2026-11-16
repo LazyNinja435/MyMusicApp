@@ -45,6 +45,8 @@ import com.harsh.shah.saavnmp3.services.ActionPlaying
 import com.harsh.shah.saavnmp3.services.MusicService
 import com.harsh.shah.saavnmp3.services.MusicService.MyBinder
 import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
+import com.harsh.shah.saavnmp3.utils.toQueueTrack
+import com.harsh.shah.saavnmp3.utils.QueueTrack
 import com.harsh.shah.saavnmp3.utils.SharedPreferenceManager
 import com.harsh.shah.saavnmp3.utils.TrackDownloader
 import com.harsh.shah.saavnmp3.utils.TrackDownloader.TrackDownloadListener
@@ -228,7 +230,6 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
             com.harsh.shah.saavnmp3.utils.MiniPlayerHelper.showQueueBottomSheet(this)
         }
 
-        if ((MusicPlayerManager.trackQueue?.size ?: 0) <= 1) binding!!.shuffleIcon.visibility = View.INVISIBLE
 
         binding!!.playPauseImage.setOnClickListener(View.OnClickListener { _: View? ->
             try {
@@ -812,13 +813,12 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
 
         val isSameSongActive = (MusicPlayerManager.MUSIC_ID == ID || MusicPlayerManager.currentlyPlayingTrackId == ID)
                 && MusicPlayerManager.player != null
-                && !MusicPlayerManager.trackQueue.isNullOrEmpty()
+                && MusicPlayerManager.queueEntries.isNotEmpty()
 
         val shouldClearQueue = !isActivityRecreated && !isSameSongActive && intent.extras?.getString("type", "") == "clear"
 
-        if (ID.isNotBlank() && (shouldClearQueue || MusicPlayerManager.trackQueue.isNullOrEmpty())) {
-            MusicPlayerManager.trackQueue = arrayListOf(ID)
-            MusicPlayerManager.track_position = 0
+        if (ID.isNotBlank() && (shouldClearQueue || MusicPlayerManager.queueEntries.isEmpty())) {
+            MusicPlayerManager.setQueue(listOf(QueueTrack(ID)))
             intent.removeExtra("type")
         }
         if ((ID.startsWith("http") || ID.startsWith("www")) && ID.contains("jiosaavn.com")) {
@@ -1329,6 +1329,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
         updateRepeatButtonUI()
 
         val primaryColor = ThemeManager.getPrimaryColor(this)
+        binding!!.shuffleIcon.isVisible = MusicPlayerManager.queueEntries.size > 1
         if (p.shuffleModeEnabled) binding!!.shuffleIcon.imageTintList = ColorStateList.valueOf(primaryColor)
         else binding!!.shuffleIcon.imageTintList = ColorStateList.valueOf(resources.getColor(R.color.textSec, null))
 
@@ -1482,15 +1483,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
                 sheetBinding.recRecyclerView.adapter = adapter
 
                 sheetBinding.playAllBtn.setOnClickListener {
-                    MusicPlayerManager.trackQueue?.clear()
-                    recommendations.mapNotNull { it.id }.forEach { id ->
-                        MusicPlayerManager.trackQueue?.add(id)
-                    }
-                    if (!MusicPlayerManager.trackQueue.isNullOrEmpty()) {
-                        MusicPlayerManager.track_position = 0
-                        MusicPlayerManager.MUSIC_ID = MusicPlayerManager.trackQueue!![0]
-                        MusicPlayerManager.playTrack()
-                    }
+                    MusicPlayerManager.playFromQueue(recommendations.mapNotNull { it.toQueueTrack() })
                     bottomSheet.dismiss()
                 }
             }

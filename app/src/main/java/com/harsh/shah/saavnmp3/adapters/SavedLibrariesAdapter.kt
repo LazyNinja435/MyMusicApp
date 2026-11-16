@@ -15,6 +15,7 @@ import com.harsh.shah.saavnmp3.records.sharedpref.SavedLibraries.Library
 import com.bumptech.glide.Glide
 import androidx.core.net.toUri
 import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
+import com.harsh.shah.saavnmp3.utils.toQueueTrack
 import android.widget.Toast
 
 class SavedLibrariesAdapter(private val data: MutableList<Library?>) :
@@ -54,14 +55,11 @@ class SavedLibrariesAdapter(private val data: MutableList<Library?>) :
             popup.setOnMenuItemClickListener { menuItem ->
                 when (menuItem.title) {
                     "Play All" -> {
-                        val songIds = library.songs?.mapNotNull { it?.id } ?: emptyList()
-                        if (songIds.isNotEmpty()) {
-                            MusicPlayerManager.cancelAutoplay()
-                            MusicPlayerManager.trackQueue = ArrayList(songIds)
-                            MusicPlayerManager.track_position = 0
-                            MusicPlayerManager.MUSIC_ID = songIds[0]
+                        val tracks = library.songs.orEmpty().mapNotNull { it?.toQueueTrack() }
+                        if (tracks.isNotEmpty()) {
+                            val id = MusicPlayerManager.setQueue(tracks)
                             val intent = Intent(v.context, com.harsh.shah.saavnmp3.activities.MusicOverviewActivity::class.java)
-                                .putExtra("id", songIds[0])
+                                .putExtra("id", id)
                             v.context.startActivity(intent)
                         } else {
                             Toast.makeText(v.context, "No songs in this library", Toast.LENGTH_SHORT).show()

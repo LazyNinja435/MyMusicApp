@@ -124,7 +124,7 @@ class MediaLibraryRepository(
 
     override suspend fun getDownloadedTracks(): List<AutoTrackItem> = withContext(Dispatchers.IO) {
         try {
-            TrackDownloader.getDownloadedTracks(context, includeArtwork = false).filterNotNull().mapNotNull { dt ->
+            TrackDownloader.getDownloadedTracks(context).mapNotNull { dt ->
                 val file = dt.file ?: return@mapNotNull null
                 if (!file.exists()) return@mapNotNull null
                 val path = file.absolutePath

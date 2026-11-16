@@ -16,6 +16,7 @@ import com.harsh.shah.saavnmp3.model.AlbumItem
 import com.harsh.shah.saavnmp3.model.BasicDataRecord
 import com.harsh.shah.saavnmp3.model.SearchListItem
 import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
+import com.harsh.shah.saavnmp3.utils.QueueTrack
 import com.bumptech.glide.Glide
 import androidx.core.net.toUri
 
@@ -84,12 +85,12 @@ class ActivitySearchListItemAdapter(private val data: MutableList<SearchListItem
                 popup.setOnMenuItemClickListener { menuItem ->
                     when (menuItem.title) {
                         "Play Next" -> {
-                            MusicPlayerManager.playNext(item.id)
+                            MusicPlayerManager.playNext(item.toQueueTrack())
                             android.widget.Toast.makeText(v.context, "Song will play next", android.widget.Toast.LENGTH_SHORT).show()
                             true
                         }
                         "Add to Queue" -> {
-                            MusicPlayerManager.addToQueue(item.id)
+                            MusicPlayerManager.addToQueue(item.toQueueTrack())
                             android.widget.Toast.makeText(v.context, "Song added to queue", android.widget.Toast.LENGTH_SHORT).show()
                             true
                         }
@@ -120,21 +121,10 @@ class ActivitySearchListItemAdapter(private val data: MutableList<SearchListItem
             intent.putExtra("id", item.id)
             when (item.type) {
                 SearchListItem.Type.SONG -> {
-                    MusicPlayerManager.cancelAutoplay()
-                    MusicPlayerManager.trackQueue?.clear()
-                    var clickIndex = 0
-                    var validIndex = 0
-                    for (i in data.indices) {
-                        val searchItem = data[i]
-                        if (searchItem.type == SearchListItem.Type.SONG && !searchItem.id.isNullOrEmpty() && searchItem.id != "<shimmer>") {
-                            MusicPlayerManager.trackQueue?.add(searchItem.id)
-                            if (i == position) {
-                                clickIndex = validIndex
-                            }
-                            validIndex++
-                        }
-                    }
-                    MusicPlayerManager.track_position = clickIndex
+                    val selected = holder.bindingAdapterPosition
+                    if (selected == RecyclerView.NO_POSITION) return@setOnClickListener
+                    MusicPlayerManager.setQueue(data.map { it.toQueueTrack() }, selected)
+                        ?: return@setOnClickListener
                     intent.setClass(holder.itemView.context, MusicOverviewActivity::class.java)
                 }
 
@@ -177,3 +167,8 @@ class ActivitySearchListItemAdapter(private val data: MutableList<SearchListItem
 
     class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView)
 }
+
+
+private fun SearchListItem.toQueueTrack(): QueueTrack? =
+    id?.takeIf { type == SearchListItem.Type.SONG && it.isNotBlank() && it != "<shimmer>" }
+        ?.let { QueueTrack(it, title(), subtitle(), coverImage) }

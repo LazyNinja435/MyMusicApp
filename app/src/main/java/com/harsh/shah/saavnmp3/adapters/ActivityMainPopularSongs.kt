@@ -13,6 +13,7 @@ import com.harsh.shah.saavnmp3.R
 import com.harsh.shah.saavnmp3.activities.MusicOverviewActivity
 import com.harsh.shah.saavnmp3.model.AlbumItem
 import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
+import com.harsh.shah.saavnmp3.utils.QueueTrack
 import com.bumptech.glide.Glide
 import androidx.core.net.toUri
 
@@ -59,16 +60,14 @@ class ActivityMainPopularSongs(private val data: MutableList<AlbumItem?>) :
         }
 
         holder.itemView.setOnClickListener { v: View? ->
-            MusicPlayerManager.cancelAutoplay()
-            MusicPlayerManager.trackQueue?.clear()
-            val songId = data[position]?.id ?: return@setOnClickListener
-            for (i in data.indices) {
-                val item = data[i]
-                if (item != null && item.id != null && item.albumTitle() != "<shimmer>") {
-                    MusicPlayerManager.trackQueue?.add(item.id)
+            val selected = holder.bindingAdapterPosition
+            if (selected == RecyclerView.NO_POSITION) return@setOnClickListener
+            val tracks = data.map { item ->
+                item?.id?.takeIf { it.isNotBlank() && item.albumTitle() != "<shimmer>" }?.let {
+                    QueueTrack(it, item.albumTitle(), item.albumSubTitle(), item.albumCover)
                 }
             }
-            MusicPlayerManager.track_position = position
+            val songId = MusicPlayerManager.setQueue(tracks, selected) ?: return@setOnClickListener
             v!!.context.startActivity(
                 Intent(v.context, MusicOverviewActivity::class.java).putExtra(
                     "id",

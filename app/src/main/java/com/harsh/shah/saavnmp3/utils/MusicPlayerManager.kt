@@ -51,6 +51,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -98,8 +100,14 @@ object MusicPlayerManager {
 
     var TRACK_QUALITY: String? = "320kbps"
     var isTrackDownloaded: Boolean = false
-    var trackQueue: MutableList<String?>? = ArrayList()
-    var track_position: Int = -1
+    private val queue = PlaybackQueue()
+    private var requestedEntry: PlaybackQueue.Entry? = null
+    private var playingEntry: PlaybackQueue.Entry? = null
+    internal val queueEntries: List<PlaybackQueue.Entry> get() = queue.entries
+    internal val currentQueueEntry: PlaybackQueue.Entry? get() = playingEntry?.takeIf { it in queue.entries }
+    internal val isLoadingQueueRecommendations: Boolean get() = recommendationJob?.isActive == true
+    val hasNextQueuedTrack: Boolean
+        get() = queue.entries.indexOf(currentQueueEntry) < queue.entries.lastIndex
 
     var MUSIC_TITLE: String? = ""
     var MUSIC_DESCRIPTION: String? = ""
@@ -118,7 +126,8 @@ object MusicPlayerManager {
 
     var isTransitioning: Boolean = false
     private var wakeLock: PowerManager.WakeLock? = null
-    private var autoplayRequestId: Long = 0L
+    private var recommendationJob: Job? = null
+    private var recommendationAnchor: PlaybackQueue.Entry? = null
     private val playbackScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mainHandler = Handler(Looper.getMainLooper())
     private var trackRequest: Job? = null
@@ -127,7 +136,7 @@ object MusicPlayerManager {
     private data class ResolvedTrack(
         val response: SongResponse?,
         val description: String,
-        val queueIds: List<String>?,
+        val queueTracks: List<QueueTrack>?,
         val queueIndex: Int
     )
 
@@ -155,9 +164,10 @@ object MusicPlayerManager {
         }
     }
 
-    fun cancelAutoplay() {
-        autoplayRequestId++
-        isFetchingAutoplay = false
+    private fun cancelAutoplay() {
+        recommendationJob?.cancel()
+        recommendationJob = null
+        recommendationAnchor = null
     }
 
     @OptIn(UnstableApi::class)
@@ -210,6 +220,7 @@ object MusicPlayerManager {
                         isTransitioning = false
                         releaseWakeLock()
                         updateWidget()
+                        maybeExtendQueue()
                     }
                     Player.STATE_ENDED -> scheduleAutomaticAdvance()
                     else -> {
@@ -222,7 +233,7 @@ object MusicPlayerManager {
                 if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
                     // ExoPlayer has one item. Repeat-all must advance the app queue.
                     if (player?.repeatMode == Player.REPEAT_MODE_ALL &&
-                        trackQueue.orEmpty().count { !it.isNullOrBlank() } > 1
+                        queue.entries.size > 1
                     ) {
                         scheduleAutomaticAdvance(repeated = true)
                     }
@@ -234,8 +245,22 @@ object MusicPlayerManager {
 
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 Log.i(TAG, "Player playWhenReady changed to: $playWhenReady (reason: $reason)")
+                if (playWhenReady) maybeExtendQueue()
                 showNotification()
                 updateWidget()
+            }
+
+            override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
+                cancelAutoplay()
+                queue.setShuffle(shuffleModeEnabled, currentQueueEntry ?: requestedEntry)
+                maybeExtendQueue()
+                showNotification()
+            }
+
+            override fun onRepeatModeChanged(repeatMode: Int) {
+                cancelAutoplay()
+                maybeExtendQueue()
+                showNotification()
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -402,7 +427,6 @@ object MusicPlayerManager {
         val p = player ?: return
         val url = SONG_URL?.takeIf { it.isNotBlank() } ?: return
         trackRequest?.cancel()
-        cancelAutoplay()
         val mediaUri = if (url.startsWith("/")) Uri.fromFile(File(url)) else Uri.parse(url)
 
         val currentSong = CURRENT_TRACK?.data?.firstOrNull()
@@ -429,6 +453,7 @@ object MusicPlayerManager {
 
         isTrackDownloaded = mediaUri.scheme == "file"
         currentlyPlayingTrackId = MUSIC_ID
+        bindQueueItem(mediaItem)
         startMediaItem(p, mediaItem)
     }
 
@@ -442,58 +467,81 @@ object MusicPlayerManager {
         showNotification()
     }
 
-    fun playFromQueue(songIds: List<String>, startIndex: Int = 0) {
-        if (songIds.isEmpty()) return
+    fun setQueue(tracks: List<QueueTrack?>, startIndex: Int = 0): String? {
+        trackRequest?.cancel()
         cancelAutoplay()
-        val safeIndex = startIndex.coerceIn(0, songIds.lastIndex)
-        trackQueue = ArrayList(songIds)
-        track_position = safeIndex
-        MUSIC_ID = songIds[safeIndex]
+        requestedEntry = queue.replace(tracks, startIndex, player?.shuffleModeEnabled == true)
+        playingEntry = requestedEntry?.takeIf { it.track.id == currentlyPlayingTrackId }
+        maybeExtendQueue()
+        notifyPlaybackListeners()
+        return requestedEntry?.track?.id
+    }
+
+    fun playFromQueue(tracks: List<QueueTrack>) {
+        setQueue(tracks)
+        requestedEntry?.let(::playQueueEntry)
+    }
+
+    internal fun playQueueEntry(entry: PlaybackQueue.Entry) {
+        if (entry !in queue.entries) return
+        if (entry != requestedEntry) cancelAutoplay()
+        requestedEntry = entry
+        MUSIC_ID = entry.track.id
         playTrack()
     }
 
-    fun playNext(trackId: String?) {
-        if (trackId.isNullOrEmpty()) return
-        cancelAutoplay()
-        val queue = trackQueue ?: ArrayList()
-        queue.remove(trackId)
-        
-        val insertPos = if (track_position == -1) 0 else track_position + 1
-        if (insertPos >= queue.size) {
-            queue.add(trackId)
-        } else {
-            queue.add(insertPos, trackId)
-        }
-        trackQueue = queue
-        
-        if (track_position == -1) {
-            track_position = 0
-            MUSIC_ID = trackId
-            playTrack()
-        }
-        updateWidget()
+    internal fun canEditQueueEntry(
+        entry: PlaybackQueue.Entry,
+        index: Int = queue.entries.indexOf(entry),
+        currentIndex: Int = queue.entries.indexOf(currentQueueEntry)
+    ): Boolean = entry != requestedEntry && index >= 0 && index > currentIndex
+
+    internal fun removeQueueEntry(entry: PlaybackQueue.Entry) {
+        if (!canEditQueueEntry(entry)) return
+        queue.remove(entry)
+        onQueueEdited()
     }
 
-    fun addToQueue(trackId: String?) {
-        if (trackId.isNullOrEmpty()) return
+    internal fun moveQueueEntry(entry: PlaybackQueue.Entry, target: PlaybackQueue.Entry): Boolean {
+        if (!canEditQueueEntry(entry) || !canEditQueueEntry(target) ||
+            entry.recommended != target.recommended
+        ) return false
+        queue.move(entry, target)
+        onQueueEdited()
+        return true
+    }
+
+    fun playNext(track: QueueTrack?) = enqueue(track, playNext = true)
+
+    fun addToQueue(track: QueueTrack?) = enqueue(track, playNext = false)
+
+    private fun enqueue(track: QueueTrack?, playNext: Boolean) {
+        if (track == null || track.id == currentQueueEntry?.track?.id) return
+        val entry = queue.enqueue(track, currentQueueEntry ?: requestedEntry, playNext) ?: return
+        if (requestedEntry == null) playQueueEntry(entry)
+        onQueueEdited()
+    }
+
+    private fun onQueueEdited() {
         cancelAutoplay()
-        val queue = trackQueue ?: ArrayList()
-        if (!queue.contains(trackId)) {
-            queue.add(trackId)
-        }
-        trackQueue = queue
-        
-        if (track_position == -1) {
-            track_position = 0
-            MUSIC_ID = trackId
-            playTrack()
-        }
-        updateWidget()
+        maybeExtendQueue()
+        showNotification()
+    }
+
+    private fun bindQueueItem(item: MediaItem) {
+        val details = QueueTrack(item.mediaId, item.mediaMetadata.title?.toString(),
+            item.mediaMetadata.artist?.toString(), item.mediaMetadata.artworkUri?.toString())
+        val entry = requestedEntry?.takeIf { it.track.id == item.mediaId && it in queue.entries }
+            ?: queue.entries.firstOrNull { it.track.id == item.mediaId }
+            ?: queue.replace(listOf(details), 0, player?.shuffleModeEnabled == true)
+        entry?.track = details
+        requestedEntry = entry
+        playingEntry = entry
     }
 
     internal suspend fun resolveMediaItem(
         trackId: String,
-        queueIds: List<String>? = null,
+        queueTracks: List<QueueTrack>? = null,
         queueIndex: Int = 0,
         download: AutoTrackItem? = null
     ): MediaItem? {
@@ -535,7 +583,7 @@ object MusicPlayerManager {
             .setMediaId(trackId)
             .setUri(uri)
             .setMediaMetadata(metadata)
-            .setTag(ResolvedTrack(response?.takeIf { song != null }, description, queueIds, queueIndex))
+            .setTag(ResolvedTrack(response?.takeIf { song != null }, description, queueTracks, queueIndex))
             .build()
     }
 
@@ -563,9 +611,7 @@ object MusicPlayerManager {
 
     private suspend fun findDownloadedTrack(context: Context, trackId: String): AutoTrackItem? =
         withContext(Dispatchers.IO) {
-            val path = if (trackId.startsWith("file://")) Uri.parse(trackId).path else trackId
-            val match = TrackDownloader.getDownloadedTracks(context, includeArtwork = false)
-                .filterNotNull().firstOrNull { it.trackUID == trackId || it.file?.absolutePath == path }
+            val match = TrackDownloader.findDownloadedTrack(context, trackId)
             val file = match?.file ?: return@withContext null
             AutoTrackItem(trackId, match.title ?: file.nameWithoutExtension, match.artist.orEmpty(),
                 match.album, localFilePath = file.absolutePath)
@@ -573,17 +619,17 @@ object MusicPlayerManager {
 
     private fun applyResolvedTrack(item: MediaItem, track: ResolvedTrack) {
         playbackGeneration++
-        if (track.queueIds != null) {
+        if (track.queueTracks != null) {
             trackRequest?.cancel()
             cancelAutoplay()
-            trackQueue = ArrayList(track.queueIds)
-            track_position = track.queueIndex
+            requestedEntry = queue.replace(track.queueTracks, track.queueIndex, player?.shuffleModeEnabled == true)
         }
 
         CURRENT_TRACK = track.response
         SONG_URL = item.localConfiguration?.uri?.toString()
         isTrackDownloaded = item.localConfiguration?.uri?.scheme == "file"
         currentlyPlayingTrackId = item.mediaId
+        bindQueueItem(item)
         setMusicDetails(item.mediaMetadata.artworkUri?.toString().orEmpty(),
             item.mediaMetadata.title?.toString().orEmpty(), track.description, item.mediaId)
         notifyPlaybackListeners()
@@ -603,7 +649,6 @@ object MusicPlayerManager {
     fun playTrack() {
         val targetId = MUSIC_ID?.takeIf { it.isNotBlank() } ?: return
         val p = player ?: return
-        cancelAutoplay()
         trackRequest?.cancel()
         playbackGeneration++
         isTransitioning = true
@@ -616,7 +661,8 @@ object MusicPlayerManager {
                 } else {
                     Log.w(TAG, "No playable source for $targetId")
                     MUSIC_ID = currentlyPlayingTrackId
-                    track_position = trackQueue?.indexOf(MUSIC_ID) ?: -1
+                    requestedEntry = currentQueueEntry
+                    maybeExtendQueue()
                     showNotification()
                 }
             } catch (e: CancellationException) {
@@ -630,36 +676,68 @@ object MusicPlayerManager {
         }
     }
 
-    private var isFetchingAutoplay = false
+    private fun maybeExtendQueue() {
+        val p = player ?: return
+        val context = appContext ?: return
+        val anchor = currentQueueEntry ?: return
+        if (requestedEntry != anchor || queue.entries.lastOrNull() != anchor ||
+            recommendationAnchor == anchor || sharedPreferenceManager?.isAutoplayEnabled != true ||
+            !p.playWhenReady || p.repeatMode != Player.REPEAT_MODE_OFF || p.playbackState == Player.STATE_IDLE
+        ) return
 
-    private fun fetchAndAppendAutoplayRecommendations(currentSong: SongResponse.Song) {
-        if (isFetchingAutoplay) return
-        val ctx = appContext ?: return
-        val playingId = currentlyPlayingTrackId ?: return
-        isFetchingAutoplay = true
-        val requestId = ++autoplayRequestId
-        val currentPosition = track_position
+        val currentSong = CURRENT_TRACK?.data?.firstOrNull()
+        val seedIds = (listOfNotNull(currentSong?.id) + queue.recommendationSeedIds())
+            .filterNot { it.startsWith("/") || it.startsWith("file:") || it.startsWith("http") }
+            .distinct()
+        if (seedIds.isEmpty()) return
 
-        RecommendationManager.getRecommendationsForSong(ctx, currentSong, limit = 10) { recommendations ->
-            if (requestId != autoplayRequestId) return@getRecommendationsForSong
-            isFetchingAutoplay = false
-            val p = player ?: return@getRecommendationsForSong
-            if (playingId != currentlyPlayingTrackId || currentPosition != track_position ||
-                p.playbackState != Player.STATE_ENDED || !p.playWhenReady
-            ) return@getRecommendationsForSong
+        recommendationAnchor = anchor
+        val queuedTracks = queue.entries.associate { it.track.id to it.track.title.orEmpty() }
+        recommendationJob = playbackScope.launch {
+            try {
+                val results = seedIds.map { id ->
+                    async {
+                        val seed = currentSong?.takeIf { it.id == id }
+                            ?: sharedPreferenceManager?.getSongResponseById(id)?.data?.firstOrNull()
+                            ?: fetchSong(context, id)?.data?.firstOrNull()
+                        if (seed == null) {
+                            emptyList()
+                        } else {
+                            suspendCancellableCoroutine { continuation ->
+                                RecommendationManager.getRecommendationsForSong(
+                                    context, seed, limit = 10, queuedTracks = queuedTracks
+                                ) { songs ->
+                                    if (continuation.isActive) continuation.resume(songs)
+                                }
+                            }
+                        }
+                    }
+                }.awaitAll()
+                if (currentQueueEntry != anchor || requestedEntry != anchor ||
+                    queue.entries.lastOrNull() != anchor || sharedPreferenceManager?.isAutoplayEnabled != true
+                ) return@launch
 
-            val queue = trackQueue ?: arrayListOf<String?>(playingId)
-            val newIds = recommendations.mapNotNull { it.id?.takeIf(String::isNotBlank) }
-                .distinct().filter { it !in queue && it != currentSong.id }
-            if (newIds.isNotEmpty()) {
-                trackQueue = queue
-                val next = queue.size
-                queue.addAll(newIds)
-                track_position = next
-                MUSIC_ID = queue[next]
-                playTrack()
+                val candidates = (0 until results.maxOf { it.size })
+                    .flatMap { rank -> results.mapNotNull { it.getOrNull(rank) } }
+                val recommendations = uniqueSongRecommendations(candidates, currentSong, queuedTracks, limit = 10)
+                    .mapNotNull { it.toQueueTrack() }
+                queue.appendRecommendations(recommendations)
+
+                if (recommendations.isNotEmpty() && p.playbackState == Player.STATE_ENDED && p.playWhenReady) {
+                    advanceTrack(automatic = true)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not extend the playback queue", e)
+            } finally {
+                if (recommendationJob == coroutineContext[Job]) {
+                    recommendationJob = null
+                    notifyPlaybackListeners()
+                }
             }
         }
+        notifyPlaybackListeners()
     }
 
     fun stopPlayback() {
@@ -682,26 +760,15 @@ object MusicPlayerManager {
 
     private fun advanceTrack(automatic: Boolean) {
         val p = player ?: return
-        val queue = trackQueue.orEmpty()
-        val currentId = if (automatic) currentlyPlayingTrackId else MUSIC_ID
-        val index = if (queue.getOrNull(track_position) == currentId) track_position else queue.indexOf(currentId)
-        val validIndices = queue.indices.filter { !queue[it].isNullOrBlank() }
-        val next = when {
-            p.shuffleModeEnabled && validIndices.any { it != index } ->
-                validIndices.filter { it != index }.random()
-            else -> validIndices.firstOrNull { it > index }
-                ?: validIndices.firstOrNull().takeIf { p.repeatMode == Player.REPEAT_MODE_ALL }
-        }
+        val current = if (automatic) currentQueueEntry else requestedEntry ?: currentQueueEntry
+        val index = queue.entries.indexOf(current)
+        val next = queue.entries.getOrNull(index + 1)
+            ?: queue.entries.firstOrNull().takeIf { p.repeatMode == Player.REPEAT_MODE_ALL }
 
         if (next != null) {
-            track_position = next
-            MUSIC_ID = queue[next]
-            playTrack()
+            playQueueEntry(next)
         } else if (automatic) {
-            val song = CURRENT_TRACK?.data?.firstOrNull()
-            if (sharedPreferenceManager?.isAutoplayEnabled == true && song != null) {
-                fetchAndAppendAutoplayRecommendations(song)
-            }
+            maybeExtendQueue()
         } else if (p.currentMediaItem != null) {
             p.seekTo(0L)
             p.play()
@@ -710,15 +777,11 @@ object MusicPlayerManager {
 
     fun prevTrack() {
         val p = player ?: return
-        val queue = trackQueue.orEmpty()
-        val index = track_position.takeIf { queue.getOrNull(it) == MUSIC_ID } ?: queue.indexOf(MUSIC_ID)
-        val previous = queue.indices.lastOrNull { it < index && !queue[it].isNullOrBlank() }
-            ?: queue.indices.lastOrNull { !queue[it].isNullOrBlank() }
-                .takeIf { p.repeatMode == Player.REPEAT_MODE_ALL }
+        val index = queue.entries.indexOf(requestedEntry ?: currentQueueEntry)
+        val previous = queue.entries.getOrNull(index - 1)
+            ?: queue.entries.lastOrNull().takeIf { p.repeatMode == Player.REPEAT_MODE_ALL }
         if (p.currentPosition <= 3000L && previous != null) {
-            track_position = previous
-            MUSIC_ID = queue[previous]
-            playTrack()
+            playQueueEntry(previous)
         } else if (p.currentMediaItem != null) {
             p.seekTo(0L)
             p.play()

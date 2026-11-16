@@ -1,145 +1,127 @@
 package com.harsh.shah.saavnmp3.adapters
 
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.TextView
-import androidx.core.net.toUri
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.isVisible
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.RecyclerView
-import com.harsh.shah.saavnmp3.R
-import com.harsh.shah.saavnmp3.records.SongResponse.Song
-import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
 import com.bumptech.glide.Glide
+import com.google.android.material.card.MaterialCardView
+import com.harsh.shah.saavnmp3.R
+import com.harsh.shah.saavnmp3.utils.PlaybackQueue
+import com.harsh.shah.saavnmp3.utils.QueueTrack
+import com.harsh.shah.saavnmp3.utils.ThemeManager
 
-class QueueSongsAdapter(
-    val data: MutableList<Song>,
-    private val onSongClick: (Int) -> Unit,
-    private val onRemoveClick: (Int) -> Unit,
-    /** Called whenever a drag-reorder completes so the caller can sync MusicPlayerManager.trackQueue */
-    private val onOrderChanged: ((fromIndex: Int, toIndex: Int) -> Unit)? = null
+internal class QueueSongsAdapter(
+    private val onPlay: (PlaybackQueue.Entry) -> Unit,
+    private val onRemove: (PlaybackQueue.Entry) -> Unit,
+    private val onMove: (PlaybackQueue.Entry, PlaybackQueue.Entry) -> Boolean
 ) : RecyclerView.Adapter<QueueSongsAdapter.ViewHolder>() {
+    data class Row(
+        val entry: PlaybackQueue.Entry,
+        val track: QueueTrack,
+        val current: Boolean,
+        val editable: Boolean,
+        val showRecommendationsHeading: Boolean
+    )
 
-    // ── Drag-to-reorder support ───────────────────────────────────────────────
+    private var rows: List<Row> = emptyList()
 
-    /** Attach an ItemTouchHelper that allows vertical drag-reordering */
+    init {
+        setHasStableIds(true)
+    }
+
+    fun submit(newRows: List<Row>) {
+        val oldRows = rows
+        if (oldRows == newRows) return
+        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize() = oldRows.size
+            override fun getNewListSize() = newRows.size
+            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int) =
+                oldRows[oldItemPosition].entry == newRows[newItemPosition].entry
+            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int) =
+                oldRows[oldItemPosition] == newRows[newItemPosition]
+        })
+        rows = newRows
+        diff.dispatchUpdatesTo(this)
+    }
+
     fun attachDragHelper(recyclerView: RecyclerView) {
-        val callback = object : ItemTouchHelper.SimpleCallback(
-            ItemTouchHelper.UP or ItemTouchHelper.DOWN,  // drag directions
-            0                                             // no swipe
-        ) {
-            private var dragFrom = -1
-            private var dragTo   = -1
+        ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
+            override fun getDragDirs(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder): Int =
+                if (rows.getOrNull(viewHolder.bindingAdapterPosition)?.editable == true) {
+                    super.getDragDirs(recyclerView, viewHolder)
+                } else {
+                    0
+                }
 
             override fun onMove(
                 recyclerView: RecyclerView,
                 viewHolder: RecyclerView.ViewHolder,
                 target: RecyclerView.ViewHolder
             ): Boolean {
-                val from = viewHolder.bindingAdapterPosition
-                val to   = target.bindingAdapterPosition
-                if (dragFrom == -1) dragFrom = from
-                dragTo = to
-                // Immediately animate the swap in the adapter
-                val item = data.removeAt(from)
-                data.add(to, item)
-                notifyItemMoved(from, to)
-                return true
+                val from = rows.getOrNull(viewHolder.bindingAdapterPosition) ?: return false
+                val to = rows.getOrNull(target.bindingAdapterPosition) ?: return false
+                return onMove(from.entry, to.entry)
             }
 
-            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {
-                // No swipe configured, nothing to do
-            }
-
-            override fun clearView(
-                recyclerView: RecyclerView,
-                viewHolder: RecyclerView.ViewHolder
-            ) {
-                super.clearView(recyclerView, viewHolder)
-                // Notify caller only once the drag is fully released
-                if (dragFrom != -1 && dragTo != -1 && dragFrom != dragTo) {
-                    onOrderChanged?.invoke(dragFrom, dragTo)
-                }
-                dragFrom = -1
-                dragTo   = -1
-                viewHolder.itemView.alpha = 1f
-            }
-
-            override fun onSelectedChanged(
-                viewHolder: RecyclerView.ViewHolder?,
-                actionState: Int
-            ) {
-                super.onSelectedChanged(viewHolder, actionState)
-                if (actionState == ItemTouchHelper.ACTION_STATE_DRAG) {
-                    // Slightly dim the dragged item so it feels "lifted"
-                    viewHolder?.itemView?.alpha = 0.7f
-                }
-            }
-        }
-        ItemTouchHelper(callback).attachToRecyclerView(recyclerView)
+            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) = Unit
+        }).attachToRecyclerView(recyclerView)
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-        val view = View.inflate(parent.context, R.layout.activity_list_song_item, null)
-        view.layoutParams = ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        )
-        return ViewHolder(view)
-    }
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder = ViewHolder(
+        LayoutInflater.from(parent.context).inflate(R.layout.queue_song_item, parent, false)
+    )
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        val song = data[position]
-        
-        val titleText  = holder.itemView.findViewById<TextView>(R.id.title)
-        val artistText = holder.itemView.findViewById<TextView>(R.id.artist)
-        val coverImage = holder.itemView.findViewById<ImageView>(R.id.coverImage)
-        val moreIcon   = holder.itemView.findViewById<ImageView>(R.id.more)
-        
-        titleText.isSelected  = true
-        artistText.isSelected = true
-        
-        titleText.text = song.name()
-        
-        val artistsNames = StringBuilder()
-        val artistsList  = song.artists?.all ?: emptyList()
-        for (i in artistsList.indices) {
-            val artistName = artistsList[i]?.name() ?: continue
-            if (artistsNames.toString().contains(artistName)) continue
-            artistsNames.append(artistName)
-            artistsNames.append(", ")
-        }
-        artistText.text = artistsNames.toString().removeSuffix(", ")
-        
-        val images = song.image
-        val imgUrl = if (images.isNullOrEmpty()) "" else images[images.size - 1]?.url ?: ""
-        if (imgUrl.isNotEmpty()) {
-            Glide.with(coverImage)
-                .load(imgUrl)
-                .placeholder(R.drawable.baseline_album_24)
-                .error(R.drawable.baseline_album_24)
-                .into(coverImage)
-        } else {
-            coverImage.setImageResource(R.drawable.baseline_album_24)
-        }
-        
-        // Use the "more" icon as the remove button
-        moreIcon.visibility = View.VISIBLE
-        moreIcon.setImageResource(R.drawable.baseline_clear_24)
-        moreIcon.setOnClickListener {
-            val pos = holder.bindingAdapterPosition
-            if (pos != RecyclerView.NO_ID.toInt()) onRemoveClick(pos)
-        }
-        
-        holder.itemView.setOnClickListener {
-            val pos = holder.bindingAdapterPosition
-            if (pos != RecyclerView.NO_ID.toInt()) onSongClick(pos)
-        }
+        val row = rows[position]
+        val context = holder.itemView.context
+        holder.heading.isVisible = row.showRecommendationsHeading
+        holder.title.text = row.track.title?.takeIf(String::isNotBlank) ?: context.getString(R.string.queue_track)
+        holder.artist.text = row.track.artist
+        holder.artist.isVisible = !row.track.artist.isNullOrBlank()
+        holder.title.isSelected = true
+        holder.artist.isSelected = true
+        holder.title.setTextColor(
+            if (row.current) ThemeManager.getOnPrimaryColor(context)
+            else ContextCompat.getColor(context, R.color.textMain)
+        )
+        holder.artist.setTextColor(
+            if (row.current) ThemeManager.getOnPrimaryColor(context)
+            else ContextCompat.getColor(context, R.color.textSec)
+        )
+        holder.card.setCardBackgroundColor(
+            if (row.current) ThemeManager.getPrimaryColor(context) else android.graphics.Color.TRANSPARENT
+        )
+        ViewCompat.setStateDescription(holder.card, if (row.current) context.getString(R.string.queue_current_track) else null)
+
+        Glide.with(holder.cover).load(row.track.artwork)
+            .placeholder(R.drawable.baseline_album_24)
+            .error(R.drawable.baseline_album_24)
+            .into(holder.cover)
+
+        holder.remove.isVisible = row.editable
+        holder.remove.setImageResource(R.drawable.baseline_clear_24)
+        holder.remove.contentDescription = context.getString(R.string.queue_remove_track)
+        holder.remove.setOnClickListener { onRemove(row.entry) }
+        holder.card.setOnClickListener { if (!row.current) onPlay(row.entry) }
     }
 
-    override fun getItemCount(): Int = data.size
+    override fun getItemId(position: Int): Long = rows[position].entry.key
+    override fun getItemCount(): Int = rows.size
 
-    class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView)
+    class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+        val heading: TextView = view.findViewById(R.id.queue_recommendations_heading)
+        val card: MaterialCardView = view.findViewById(R.id.queue_song_card)
+        val title: TextView = view.findViewById(R.id.title)
+        val artist: TextView = view.findViewById(R.id.artist)
+        val cover: ImageView = view.findViewById(R.id.coverImage)
+        val remove: ImageView = view.findViewById(R.id.more)
+    }
 }

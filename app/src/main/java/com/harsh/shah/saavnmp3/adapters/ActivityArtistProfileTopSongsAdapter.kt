@@ -11,6 +11,7 @@ import com.harsh.shah.saavnmp3.activities.MusicOverviewActivity
 import com.harsh.shah.saavnmp3.databinding.ActivityArtistProfileViewTopSongsItemBinding
 import com.harsh.shah.saavnmp3.records.SongResponse.Song
 import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
+import com.harsh.shah.saavnmp3.utils.toQueueTrack
 import com.bumptech.glide.Glide
 import androidx.core.net.toUri
 import android.widget.Toast
@@ -61,12 +62,12 @@ class ActivityArtistProfileTopSongsAdapter(private val data: MutableList<Song?>)
             popup.setOnMenuItemClickListener { menuItem ->
                 when (menuItem.title) {
                     "Play Next" -> {
-                        MusicPlayerManager.playNext(song.id)
+                        MusicPlayerManager.playNext(song.toQueueTrack())
                         Toast.makeText(v.context, "Song will play next", Toast.LENGTH_SHORT).show()
                         true
                     }
                     "Add to Queue" -> {
-                        MusicPlayerManager.addToQueue(song.id)
+                        MusicPlayerManager.addToQueue(song.toQueueTrack())
                         Toast.makeText(v.context, "Song added to queue", Toast.LENGTH_SHORT).show()
                         true
                     }
@@ -77,27 +78,15 @@ class ActivityArtistProfileTopSongsAdapter(private val data: MutableList<Song?>)
         }
 
         holder.itemView.setOnClickListener { view: View? ->
-            MusicPlayerManager.cancelAutoplay()
-            MusicPlayerManager.trackQueue?.clear()
-            val songId = data[position]?.id
-            var clickIndex = position
-            var validIndex = 0
-            for (i in data.indices) {
-                val song = data[i]
-                if (song != null && song.id != null && song.id != "<shimmer>") {
-                    MusicPlayerManager.trackQueue?.add(song.id)
-                    if (i == position) {
-                        clickIndex = validIndex
-                    }
-                    validIndex++
-                }
-            }
-            MusicPlayerManager.track_position = clickIndex
+            val selected = holder.bindingAdapterPosition
+            if (selected == RecyclerView.NO_POSITION) return@setOnClickListener
+            val id = MusicPlayerManager.setQueue(data.map { it?.toQueueTrack() }, selected)
+                ?: return@setOnClickListener
             view!!.context.startActivity(
                 Intent(
                     view.context,
                     MusicOverviewActivity::class.java
-                ).putExtra("id", data[position]!!.id)
+                ).putExtra("id", id)
             )
         }
     }

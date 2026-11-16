@@ -12,6 +12,7 @@ import com.harsh.shah.saavnmp3.activities.MusicOverviewActivity
 import com.harsh.shah.saavnmp3.databinding.ActivityListSongItemBinding
 import com.harsh.shah.saavnmp3.records.sharedpref.SavedLibraries.Library
 import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
+import com.harsh.shah.saavnmp3.utils.toQueueTrack
 import com.bumptech.glide.Glide
 import androidx.core.net.toUri
 
@@ -53,12 +54,12 @@ class UserCreatedSongsListAdapter(private val data: MutableList<Library.Songs?>)
             popup.setOnMenuItemClickListener { menuItem ->
                 when (menuItem.title) {
                     "Play Next" -> {
-                        MusicPlayerManager.playNext(data[position]?.id)
+                        MusicPlayerManager.playNext(data.getOrNull(holder.bindingAdapterPosition)?.toQueueTrack())
                         Toast.makeText(v.context, "Song will play next", Toast.LENGTH_SHORT).show()
                         true
                     }
                     "Add to Queue" -> {
-                        MusicPlayerManager.addToQueue(data[position]?.id)
+                        MusicPlayerManager.addToQueue(data.getOrNull(holder.bindingAdapterPosition)?.toQueueTrack())
                         Toast.makeText(v.context, "Song added to queue", Toast.LENGTH_SHORT).show()
                         true
                     }
@@ -69,23 +70,13 @@ class UserCreatedSongsListAdapter(private val data: MutableList<Library.Songs?>)
         }
 
         holder.itemView.setOnClickListener { view: View? ->
-            // Build full queue from list and set correct position
-            MusicPlayerManager.cancelAutoplay()
-            MusicPlayerManager.trackQueue?.clear()
-            var clickIndex = 0
-            var validIndex = 0
-            for (i in data.indices) {
-                val song = data[i]
-                if (song != null && !song.id.isNullOrEmpty()) {
-                    MusicPlayerManager.trackQueue?.add(song.id)
-                    if (i == position) clickIndex = validIndex
-                    validIndex++
-                }
-            }
-            MusicPlayerManager.track_position = clickIndex
+            val selected = holder.bindingAdapterPosition
+            if (selected == RecyclerView.NO_POSITION) return@setOnClickListener
+            val id = MusicPlayerManager.setQueue(data.map { it?.toQueueTrack() }, selected)
+                ?: return@setOnClickListener
             holder.itemView.context.startActivity(
                 Intent(view!!.context, MusicOverviewActivity::class.java)
-                    .putExtra("id", data[position]!!.id)
+                    .putExtra("id", id)
             )
         }
     }

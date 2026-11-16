@@ -1,15 +1,16 @@
 package com.harsh.shah.saavnmp3.adapters
 
-import android.app.Activity
-import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.util.LruCache
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.view.isVisible
 import androidx.recyclerview.widget.RecyclerView
-import com.facebook.shimmer.ShimmerFrameLayout
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.harsh.shah.saavnmp3.R
@@ -17,124 +18,127 @@ import com.harsh.shah.saavnmp3.activities.MusicOverviewActivity
 import com.harsh.shah.saavnmp3.databinding.DownloadManagerMoreViewBinding
 import com.harsh.shah.saavnmp3.utils.TrackDownloader
 import com.harsh.shah.saavnmp3.utils.TrackDownloader.DownloadedTrack
+import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-class ActivityDownloadManagerListAdapter(private val data: MutableList<DownloadedTrack>) :
-    RecyclerView.Adapter<ActivityDownloadManagerListAdapter.ViewHolder?>() {
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-        val _v = View.inflate(
-            parent.context,
-            if (viewType == 0) R.layout.download_manager_list_item else R.layout.activity_list_shimmer,
-            null
-        )
-        val layoutParams = ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        )
-        _v.layoutParams = layoutParams
-        return ViewHolder(_v)
+class ActivityDownloadManagerListAdapter(private val scope: CoroutineScope) :
+    RecyclerView.Adapter<ActivityDownloadManagerListAdapter.ViewHolder>() {
+    private val tracks = mutableListOf<DownloadedTrack>()
+    private val artworkDispatcher = Dispatchers.IO.limitedParallelism(2)
+
+    private data class Artwork(val bitmap: Bitmap?)
+    private val artworkCache = object : LruCache<File, Artwork>(8 * 1024) {
+        override fun sizeOf(key: File, value: Artwork): Int =
+            maxOf(1, (value.bitmap?.allocationByteCount ?: 0) / 1024)
     }
 
+    fun append(batch: List<DownloadedTrack>) {
+        if (batch.isEmpty()) return
+        val start = tracks.size
+        tracks.addAll(batch)
+        notifyItemRangeInserted(start, batch.size)
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder =
+        ViewHolder(LayoutInflater.from(parent.context).inflate(R.layout.download_manager_list_item, parent, false))
+
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        if (getItemViewType(position) == 1) {
-            (holder.itemView.findViewById<View?>(R.id.shimmer) as ShimmerFrameLayout).startShimmer()
-            return
-        }
+        val track = tracks[position]
+        holder.title.text = track.title
+        holder.artist.text = track.artist
+        holder.title.isSelected = true
+        holder.artist.isSelected = true
+        holder.artworkJob?.cancel()
+        holder.artworkJob = loadArtwork(holder.cover, track.file)
 
-        holder.itemView.findViewById<View>(R.id.title).isSelected = true
-        holder.itemView.findViewById<View>(R.id.artist).isSelected = true
-
-        val item = data[position]
-
-        (holder.itemView.findViewById<View?>(R.id.title) as TextView).text = item.title
-        (holder.itemView.findViewById<View?>(R.id.artist) as TextView).text = item.artist
-
-        val coverView = holder.itemView.findViewById<ImageView?>(R.id.coverImage)
-        if (item.coverImage != null) {
-            coverView?.setImageBitmap(item.coverImage)
-        } else {
-            coverView?.setImageResource(R.drawable.baseline_album_24)
-        }
-
-        holder.itemView.setOnClickListener { view: View? ->
-            val adapterPos = holder.bindingAdapterPosition
-            if (adapterPos != RecyclerView.NO_POSITION && adapterPos < data.size) {
-                showDialog(data[adapterPos], adapterPos, view!!)
-            }
-        }
-
-        holder.itemView.setOnLongClickListener { view: View? ->
-            val adapterPos = holder.bindingAdapterPosition
-            if (adapterPos != RecyclerView.NO_POSITION && adapterPos < data.size) {
-                showDeleteConfirmation(view!!.context, data[adapterPos], adapterPos)
-            }
+        holder.itemView.setOnClickListener { view -> showDialog(track, view) }
+        holder.itemView.setOnLongClickListener { view ->
+            showDeleteConfirmation(view, track)
             true
         }
     }
 
-    private fun showDialog(track: DownloadedTrack, position: Int, view: View) {
-        val bottomSheetDialog =
-            BottomSheetDialog(view.context, R.style.MyBottomSheetDialogTheme)
-        val _binding =
-            DownloadManagerMoreViewBinding.inflate((view.context as Activity).layoutInflater)
-        _binding.songTitle.text = track.title
-        _binding.songSubTitle.text = track.artist
-        _binding.coverImage.setImageBitmap(track.coverImage)
-        _binding.albumTitle.text = track.album
-        _binding.songYear.text = track.year
-        _binding.bitrate.text = track.bitrate + " kbps"
-        _binding.duration.text = track.trackLength + " Seconds"
-        if (track.trackUID.isNullOrEmpty()) _binding.button.visibility = View.GONE
-        _binding.button.setOnClickListener(View.OnClickListener { v: View? ->
-            v!!.context.startActivity(
-                Intent(v.context, MusicOverviewActivity::class.java).putExtra(
-                    "type",
-                    "clear"
-                ).putExtra("id", track.trackUID)
-            )
-            bottomSheetDialog.dismiss()
-        })
-        _binding.deleteButton.setOnClickListener {
-            showDeleteConfirmation(view.context, track, position, bottomSheetDialog)
-        }
-        bottomSheetDialog.setContentView(_binding.getRoot())
-        bottomSheetDialog.show()
+    override fun onViewRecycled(holder: ViewHolder) {
+        holder.artworkJob?.cancel()
+        holder.artworkJob = null
+        holder.cover.setImageDrawable(null)
+        super.onViewRecycled(holder)
     }
 
-    private fun showDeleteConfirmation(
-        context: Context,
-        track: DownloadedTrack,
-        position: Int,
-        bottomSheet: BottomSheetDialog? = null
-    ) {
+    private fun loadArtwork(image: ImageView, file: File?): Job? {
+        image.setImageResource(R.drawable.baseline_album_24)
+        if (file == null) return null
+        artworkCache.get(file)?.let {
+            it.bitmap?.let(image::setImageBitmap)
+            return null
+        }
+        return scope.launch {
+            val bitmap = withContext(artworkDispatcher) { TrackDownloader.readDownloadArtwork(file) }
+            artworkCache.put(file, Artwork(bitmap))
+            bitmap?.let(image::setImageBitmap)
+        }
+    }
+
+    private fun showDialog(track: DownloadedTrack, view: View) {
+        val context = view.context
+        val dialog = BottomSheetDialog(context, R.style.MyBottomSheetDialogTheme)
+        val binding = DownloadManagerMoreViewBinding.inflate(LayoutInflater.from(context))
+        binding.songTitle.text = track.title
+        binding.songSubTitle.text = track.artist
+        binding.albumTitle.text = track.album
+        binding.songYear.text = track.year
+        binding.bitrate.text = track.bitrate + " kbps"
+        binding.duration.text = track.trackLength + " Seconds"
+        val artworkJob = loadArtwork(binding.coverImage, track.file)
+        dialog.setOnDismissListener { artworkJob?.cancel() }
+        binding.button.isVisible = !track.trackUID.isNullOrEmpty()
+        binding.button.setOnClickListener {
+            context.startActivity(Intent(context, MusicOverviewActivity::class.java)
+                .putExtra("type", "clear").putExtra("id", track.trackUID))
+            dialog.dismiss()
+        }
+        binding.deleteButton.setOnClickListener { showDeleteConfirmation(view, track, dialog) }
+        dialog.setContentView(binding.root)
+        dialog.show()
+    }
+
+    private fun showDeleteConfirmation(view: View, track: DownloadedTrack, bottomSheet: BottomSheetDialog? = null) {
+        val context = view.context
         MaterialAlertDialogBuilder(context)
             .setTitle("Delete Downloaded Song")
             .setMessage("Are you sure you want to delete \"${track.title}\" from your device?")
             .setPositiveButton("Delete") { _, _ ->
-                val deleted = TrackDownloader.deleteDownloadedTrack(context, track)
-                if (deleted) {
-                    bottomSheet?.dismiss()
-                    if (position in data.indices) {
-                        data.removeAt(position)
-                        notifyItemRemoved(position)
-                        notifyItemRangeChanged(position, data.size - position)
+                scope.launch {
+                    val deleted = withContext(Dispatchers.IO) {
+                        TrackDownloader.deleteDownloadedTrack(context.applicationContext, track)
                     }
-                    Toast.makeText(context, "Song deleted from device", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(context, "Failed to delete file", Toast.LENGTH_SHORT).show()
+                    if (deleted) {
+                        bottomSheet?.dismiss()
+                        track.file?.let(artworkCache::remove)
+                        val position = tracks.indexOf(track)
+                        if (position >= 0) {
+                            tracks.removeAt(position)
+                            notifyItemRemoved(position)
+                        }
+                    }
+                    Toast.makeText(context, if (deleted) "Song deleted from device" else "Failed to delete file",
+                        Toast.LENGTH_SHORT).show()
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    override fun getItemCount(): Int {
-        return data.size
-    }
+    override fun getItemCount(): Int = tracks.size
 
-    override fun getItemViewType(position: Int): Int {
-        if (data.get(position).title == "<shimmer>") return 1
-        else return 0
+    class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+        val title: TextView = itemView.findViewById(R.id.title)
+        val artist: TextView = itemView.findViewById(R.id.artist)
+        val cover: ImageView = itemView.findViewById(R.id.coverImage)
+        var artworkJob: Job? = null
     }
-
-    class ViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView)
 }

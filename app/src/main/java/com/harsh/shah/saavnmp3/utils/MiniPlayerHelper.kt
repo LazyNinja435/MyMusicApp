@@ -10,16 +10,18 @@ import android.view.View
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.net.toUri
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.isVisible
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.recyclerview.widget.LinearLayoutManager
+import com.harsh.shah.saavnmp3.adapters.QueueSongsAdapter
+import com.harsh.shah.saavnmp3.databinding.DialogQueueBinding
 import com.harsh.shah.saavnmp3.R
 import com.harsh.shah.saavnmp3.activities.MusicOverviewActivity
 import com.bumptech.glide.Glide
 import com.google.android.material.bottomsheet.BottomSheetDialog
-import android.widget.Toast
-import com.google.gson.Gson
-import com.harsh.shah.saavnmp3.records.SongResponse
-import com.harsh.shah.saavnmp3.network.ApiManager
-import com.harsh.shah.saavnmp3.network.utility.RequestNetwork
 
 object MiniPlayerHelper {
     private val handler = Handler(Looper.getMainLooper())
@@ -172,111 +174,78 @@ object MiniPlayerHelper {
     }
 
     fun showQueueBottomSheet(activity: AppCompatActivity) {
-        val bottomSheetDialog = BottomSheetDialog(activity, R.style.MyBottomSheetDialogTheme)
-        val dialogView = activity.layoutInflater.inflate(R.layout.dialog_queue, null)
-        bottomSheetDialog.setContentView(dialogView)
+        val dialog = BottomSheetDialog(activity, R.style.MyBottomSheetDialogTheme)
+        val binding = DialogQueueBinding.inflate(activity.layoutInflater)
+        dialog.setContentView(binding.root)
+        binding.queueFrame.layoutParams.height = (activity.resources.displayMetrics.heightPixels * 0.58f)
+            .toInt().coerceAtMost((480 * activity.resources.displayMetrics.density).toInt())
+        val layout = LinearLayoutManager(activity)
+        binding.queueRecyclerView.layoutManager = layout
+        val adapter = QueueSongsAdapter(
+            onPlay = MusicPlayerManager::playQueueEntry,
+            onRemove = MusicPlayerManager::removeQueueEntry,
+            onMove = MusicPlayerManager::moveQueueEntry
+        )
+        binding.queueRecyclerView.adapter = adapter
+        adapter.attachDragHelper(binding.queueRecyclerView)
 
-        val nowPlayingCover = dialogView.findViewById<ImageView>(R.id.now_playing_cover)
-        val nowPlayingTitle = dialogView.findViewById<TextView>(R.id.now_playing_title)
-        val nowPlayingArtist = dialogView.findViewById<TextView>(R.id.now_playing_artist)
-        val queueRecyclerView = dialogView.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.queue_recycler_view)
-        val queueProgressBar = dialogView.findViewById<android.widget.ProgressBar>(R.id.queue_progress_bar)
-        val queueEmptyTv = dialogView.findViewById<TextView>(R.id.queue_empty_tv)
-
-        // Setup Now Playing
-        nowPlayingTitle.text = MusicPlayerManager.MUSIC_TITLE
-        nowPlayingArtist.text = MusicPlayerManager.MUSIC_DESCRIPTION
-        if (!MusicPlayerManager.IMAGE_URL.isNullOrBlank()) {
-            try {
-                Glide.with(nowPlayingCover).load(MusicPlayerManager.IMAGE_URL).into(nowPlayingCover)
-            } catch (e: Exception) {}
-        }
-
-        queueRecyclerView.layoutManager = androidx.recyclerview.widget.LinearLayoutManager(activity)
-
-        val queue = MusicPlayerManager.trackQueue ?: ArrayList()
-        val pos = MusicPlayerManager.track_position
-        val upcomingIds = if (pos >= 0 && pos < queue.size - 1) {
-            queue.subList(pos + 1, queue.size).filterNotNull()
-        } else {
-            ArrayList()
-        }
-
-        if (upcomingIds.isEmpty()) {
-            queueEmptyTv.visibility = View.VISIBLE
-            queueRecyclerView.visibility = View.GONE
-            queueProgressBar.visibility = View.GONE
-        } else {
-            queueEmptyTv.visibility = View.GONE
-            queueRecyclerView.visibility = View.GONE
-            queueProgressBar.visibility = View.VISIBLE
-
-            val idsString = upcomingIds.joinToString(",")
-            ApiManager(activity).retrieveSongsByIds(idsString, object : RequestNetwork.RequestListener {
-                override fun onResponse(tag: String?, response: String?, responseHeaders: HashMap<String?, Any?>?) {
-                    try {
-                        val songResponse = Gson().fromJson(response, SongResponse::class.java)
-                        if (songResponse.success && !songResponse.data.isNullOrEmpty()) {
-                            val songList = songResponse.data.filterNotNull().toMutableList()
-                            
-                            queueProgressBar.visibility = View.GONE
-                            queueRecyclerView.visibility = View.VISIBLE
-                            
-                            val adapter = com.harsh.shah.saavnmp3.adapters.QueueSongsAdapter(
-                                songList,
-                                onSongClick = { itemIndex ->
-                                    val absoluteIndex = pos + 1 + itemIndex
-                                    if (absoluteIndex < queue.size) {
-                                        MusicPlayerManager.track_position = absoluteIndex
-                                        MusicPlayerManager.MUSIC_ID = queue[absoluteIndex]
-                                        MusicPlayerManager.playTrack()
-                                        bottomSheetDialog.dismiss()
-                                    }
-                                },
-                                onRemoveClick = { itemIndex ->
-                                    val absoluteIndex = pos + 1 + itemIndex
-                                    if (absoluteIndex < queue.size) {
-                                        queue.removeAt(absoluteIndex)
-                                        songList.removeAt(itemIndex)
-                                        queueRecyclerView.adapter?.notifyItemRemoved(itemIndex)
-                                        if (songList.isEmpty()) {
-                                            queueEmptyTv.visibility = View.VISIBLE
-                                            queueRecyclerView.visibility = View.GONE
-                                        }
-                                        Toast.makeText(activity, "Removed from queue", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                onOrderChanged = { fromItem, toItem ->
-                                    // fromItem / toItem are indices within the adapter's songList (upcoming only)
-                                    // Map back to absolute positions in the full queue
-                                    val absoluteFrom = pos + 1 + fromItem
-                                    val absoluteTo   = pos + 1 + toItem
-                                    if (absoluteFrom in queue.indices && absoluteTo in queue.indices) {
-                                        val id = queue.removeAt(absoluteFrom)
-                                        queue.add(absoluteTo, id)
-                                    }
-                                }
-                            )
-                            adapter.attachDragHelper(queueRecyclerView)
-                            queueRecyclerView.adapter = adapter
-                        } else {
-                            queueProgressBar.visibility = View.GONE
-                            queueEmptyTv.visibility = View.VISIBLE
-                        }
-                    } catch (e: Exception) {
-                        Log.e("MiniPlayerHelper", "Error parsing queue response", e)
-                        queueProgressBar.visibility = View.GONE
-                        queueEmptyTv.visibility = View.VISIBLE
-                    }
-                }
-
-                override fun onErrorResponse(tag: String?, message: String?) {
-                    queueProgressBar.visibility = View.GONE
-                    queueEmptyTv.visibility = View.VISIBLE
-                }
+        var lastCurrent: PlaybackQueue.Entry? = null
+        var lastShuffle: Boolean? = null
+        fun render() {
+            val entries = MusicPlayerManager.queueEntries
+            val current = MusicPlayerManager.currentQueueEntry
+            val shuffle = MusicPlayerManager.player?.shuffleModeEnabled == true
+            val currentIndex = entries.indexOf(current)
+            val lastPlaylistTrack = entries.indexOfLast { !it.recommended }
+            val recommendationsStart = lastPlaylistTrack + 1
+            adapter.submit(entries.mapIndexed { index, entry ->
+                QueueSongsAdapter.Row(
+                    entry, entry.track, entry == current,
+                    MusicPlayerManager.canEditQueueEntry(entry, index, currentIndex),
+                    entry.recommended && index == recommendationsStart
+                )
             })
+            binding.queueEmptyTv.isVisible = entries.isEmpty()
+            binding.queueLoadingRecommendations.isVisible = MusicPlayerManager.isLoadingQueueRecommendations
+            binding.queueShuffle.isEnabled = entries.size > 1
+            binding.queueShuffle.imageTintList = ColorStateList.valueOf(
+                if (shuffle) ThemeManager.getPrimaryColor(activity)
+                else ContextCompat.getColor(activity, R.color.textSec)
+            )
+            ViewCompat.setStateDescription(binding.queueShuffle, activity.getString(
+                if (shuffle) R.string.queue_shuffle_on else R.string.queue_shuffle_off
+            ))
+
+            val visible = layout.findFirstVisibleItemPosition()..layout.findLastVisibleItemPosition()
+            val shuffleChanged = lastShuffle != null && shuffle != lastShuffle
+            if (currentIndex >= 0 && (shuffleChanged || (current != lastCurrent && currentIndex !in visible))) {
+                binding.queueRecyclerView.scrollToPosition(currentIndex)
+            }
+            lastCurrent = current
+            lastShuffle = shuffle
         }
 
-        bottomSheetDialog.show()
+        binding.queueShuffle.setOnClickListener {
+            MusicPlayerManager.player?.let { player ->
+                player.shuffleModeEnabled = !player.shuffleModeEnabled
+            }
+        }
+        val listener = object : MusicPlayerManager.PlaybackListener {
+            override fun onPlaybackStateUpdated() = render()
+        }
+        val observer = object : DefaultLifecycleObserver {
+            override fun onDestroy(owner: LifecycleOwner) {
+                MusicPlayerManager.removePlaybackListener(listener)
+                dialog.dismiss()
+            }
+        }
+        dialog.setOnDismissListener {
+            MusicPlayerManager.removePlaybackListener(listener)
+            activity.lifecycle.removeObserver(observer)
+        }
+        dialog.show()
+        activity.lifecycle.addObserver(observer)
+        MusicPlayerManager.addPlaybackListener(listener)
+        render()
     }
 }

@@ -11,4 +11,15 @@
 
     <string name="widget_vinyl_name">Melotune Vinyl Record</string>
     <string name="widget_vinyl_desc">Unique retro turntable vinyl disc player for your home screen</string>
+    <string name="queue_title">Music Queue</string>
+    <string name="queue_recommendations">Recommended for this queue</string>
+    <string name="queue_loading_recommendations">Finding recommendations…</string>
+    <string name="queue_empty">Your queue is empty</string>
+    <string name="queue_track">Track</string>
+    <string name="queue_current_track">Current track</string>
+    <string name="queue_remove_track">Remove from queue</string>
+    <string name="queue_shuffle">Shuffle</string>
+    <string name="queue_shuffle_on">Shuffle on</string>
+    <string name="queue_shuffle_off">Shuffle off</string>
+    <string name="downloads_empty">No downloaded songs</string>
 </resources>

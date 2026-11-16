@@ -33,6 +33,8 @@ import com.harsh.shah.saavnmp3.records.sharedpref.SavedLibraries
 import com.harsh.shah.saavnmp3.records.sharedpref.SavedLibraries.Library
 import com.harsh.shah.saavnmp3.utils.MiniPlayerHelper
 import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
+import com.harsh.shah.saavnmp3.utils.toQueueTrack
+import com.harsh.shah.saavnmp3.utils.QueueTrack
 import com.harsh.shah.saavnmp3.utils.SharedPreferenceManager
 import com.harsh.shah.saavnmp3.utils.ThemeManager
 import com.harsh.shah.saavnmp3.utils.TrackDownloader
@@ -43,7 +45,7 @@ import com.bumptech.glide.Glide
 class ListActivity : AppCompatActivity() {
     var binding: ActivityListBinding? = null
 
-    private val trackQueue: MutableList<String?> = ArrayList()
+    private var queueTracks: List<QueueTrack> = emptyList()
     private val loadedSongs: MutableList<Song> = ArrayList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -61,19 +63,9 @@ class ListActivity : AppCompatActivity() {
         showShimmerData()
 
         binding!!.playAllBtn.setOnClickListener {
-            if (!trackQueue.isEmpty()) {
-                MusicPlayerManager.trackQueue = ArrayList(trackQueue)
-                MusicPlayerManager.track_position = 0
-                Log.i(
-                    TAG,
-                    "trackQueueSet:  ${MusicPlayerManager.trackQueue}"
-                )
-                startActivity(
-                    Intent(this@ListActivity, MusicOverviewActivity::class.java).putExtra(
-                        "id",
-                        trackQueue[0]
-                    )
-                )
+            if (queueTracks.isNotEmpty()) {
+                val id = MusicPlayerManager.setQueue(queueTracks)
+                startActivity(Intent(this, MusicOverviewActivity::class.java).putExtra("id", id))
             }
         }
 
@@ -520,9 +512,7 @@ class ListActivity : AppCompatActivity() {
                     songs.filterNotNull().toMutableList()
                 )
             )
-            for (song in songs) {
-                if (song != null) trackQueue.add(song.id)
-            }
+            queueTracks = songs.mapNotNull { it?.toQueueTrack() }
         }
     }
 
@@ -555,11 +545,7 @@ class ListActivity : AppCompatActivity() {
                 fallbackCoverUrl = coverUrl
             )
         )
-        for (song in songs) {
-            if (song != null) trackQueue.add(song.id)
-        }
-
-        // ((ApplicationClass)getApplicationContext()).setTrackQueue(trackQueue);
+        queueTracks = songs.mapNotNull { it?.toQueueTrack(coverUrl) }
         binding!!.shareIcon.setOnClickListener(View.OnClickListener {
             if (data.url.isNullOrBlank()) return@OnClickListener
             val sendIntent = Intent()
@@ -613,11 +599,7 @@ class ListActivity : AppCompatActivity() {
                 fallbackCoverUrl = coverUrl
             )
         )
-        for (song in songs) {
-            if (song != null) trackQueue.add(song.id)
-        }
-
-        // ((ApplicationClass)getApplicationContext()).setTrackQueue(trackQueue);
+        queueTracks = songs.mapNotNull { it?.toQueueTrack(coverUrl) }
         binding!!.shareIcon.setOnClickListener(View.OnClickListener {
             if (data.url.isNullOrBlank()) return@OnClickListener
             val sendIntent = Intent()

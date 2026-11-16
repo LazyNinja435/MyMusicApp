@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
+import android.util.LruCache
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.arthenica.ffmpegkit.FFmpegKit
@@ -26,6 +27,10 @@ import com.harsh.shah.saavnmp3.records.SongResponse.Song
 import com.harsh.shah.saavnmp3.services.DownloadCancelReceiver
 import com.harsh.shah.saavnmp3.services.TrackDownloadService
 import com.samyak.lrclib.LrcLib
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.runBlocking
 import org.jaudiotagger.audio.AudioFileIO
 import org.jaudiotagger.tag.FieldKey
@@ -137,89 +142,127 @@ object TrackDownloader {
         return false
     }
 
-    fun getDownloadedTracks(context: Context, includeArtwork: Boolean = true): MutableList<DownloadedTrack?> {
-        val data: MutableList<DownloadedTrack?> = ArrayList()
-        val musicDir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
-            "Melotune"
-        )
-        if (!musicDir.exists()) return data
+    private data class CachedDownload(val modified: Long, val size: Long, val track: DownloadedTrack)
 
-        val audioExtensions = DownloadFormat.values().map { it.extension.lowercase() }.toSet()
-        val files = musicDir.walkTopDown().maxDepth(3).filter { file ->
-            file.isFile && !file.name.startsWith(".") && file.extension.lowercase() in audioExtensions
-        }.sortedByDescending { it.lastModified() }.toList()
+    private val downloadedMetadata = LruCache<File, CachedDownload>(1000)
 
-        for (file in files) {
-            try {
-                val f = AudioFileIO.read(file)
-                val tag = f.getTag()
-                val audioHeader = f.getAudioHeader()
-                val uidFieldIdPrefix = "----:" + context.packageName + ":"
-                val uidFieldId = uidFieldIdPrefix + "TrackUID"
-                val title: String = tag?.getFirst(FieldKey.TITLE)?.takeIf { it.isNotBlank() } ?: file.nameWithoutExtension
-                val artist: String = tag?.getFirst(FieldKey.ARTIST) ?: ""
-                val album: String = tag?.getFirst(FieldKey.ALBUM) ?: ""
-                val year: String = tag?.getFirst(FieldKey.YEAR) ?: ""
-                val bitrate = if (audioHeader != null) audioHeader.bitRate.toString() else "344"
-                val trackLength = audioHeader?.trackLength?.toString() ?: "0"
+    private fun downloadedFiles(): List<File> {
+        val musicDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "Melotune")
+        if (!musicDir.exists()) return emptyList()
+        val audioExtensions = DownloadFormat.entries.map { it.extension }.toSet()
+        return musicDir.walkTopDown().maxDepth(3)
+            .filter { it.isFile && !it.name.startsWith(".") && it.extension.lowercase() in audioExtensions }
+            .map { file -> file to file.lastModified() }
+            .sortedByDescending { (_, modified) -> modified }
+            .map { (file, _) -> file }
+            .toList()
+    }
 
-                var trackUID: String? = null
-                if (tag != null) {
-                    val field = tag.getFirstField(uidFieldId)
-                    if (field != null) {
+    fun getDownloadedTracks(context: Context): List<DownloadedTrack> =
+        downloadedFiles().mapNotNull { readDownloadMetadata(context, it) }
+
+    fun downloadedTrackBatches(context: Context): Flow<List<DownloadedTrack>> = flow {
+        val files = downloadedFiles()
+        emit(files.take(12).mapNotNull { readDownloadMetadata(context, it) })
+        for (batch in files.drop(12).chunked(40)) {
+            emit(batch.mapNotNull { readDownloadMetadata(context, it) })
+        }
+    }.flowOn(Dispatchers.IO)
+
+    fun findDownloadedTrack(context: Context, trackId: String): DownloadedTrack? {
+        val path = if (trackId.startsWith("file://")) android.net.Uri.parse(trackId).path else trackId
+        val files = downloadedFiles()
+        if (path?.startsWith("/") == true) {
+            return files.firstOrNull { it.absolutePath == path }?.let { readDownloadMetadata(context, it) }
+        }
+        return files.asSequence().mapNotNull { readDownloadMetadata(context, it) }
+            .firstOrNull { it.trackUID == trackId }
+    }
+
+    private fun readDownloadMetadata(context: Context, file: File): DownloadedTrack? {
+        val modified = file.lastModified()
+        val size = file.length()
+        downloadedMetadata.get(file)?.let {
+            if (it.modified == modified && it.size == size) return it.track
+        }
+        return try {
+            val f = AudioFileIO.read(file)
+            val tag = f.getTag()
+            val audioHeader = f.getAudioHeader()
+            val uidFieldIdPrefix = "----:" + context.packageName + ":"
+            val uidFieldId = uidFieldIdPrefix + "TrackUID"
+            val title: String = tag?.getFirst(FieldKey.TITLE)?.takeIf { it.isNotBlank() } ?: file.nameWithoutExtension
+            val artist: String = tag?.getFirst(FieldKey.ARTIST) ?: ""
+            val album: String = tag?.getFirst(FieldKey.ALBUM) ?: ""
+            val year: String = tag?.getFirst(FieldKey.YEAR) ?: ""
+            val bitrate = if (audioHeader != null) audioHeader.bitRate.toString() else "344"
+            val trackLength = audioHeader?.trackLength?.toString() ?: "0"
+
+            var trackUID: String? = null
+            if (tag != null) {
+                val field = tag.getFirstField(uidFieldId)
+                if (field != null) {
+                    try {
+                        trackUID = field.toString()
                         try {
-                            trackUID = field.toString()
-                            try {
-                                val m = field.javaClass.getMethod("getContent")
-                                val `val` = m.invoke(field)
-                                if (`val` != null) trackUID = `val`.toString()
-                            } catch (_: NoSuchMethodException) {
-                            }
-                        } catch (_: Exception) {
+                            val m = field.javaClass.getMethod("getContent")
+                            val `val` = m.invoke(field)
+                            if (`val` != null) trackUID = `val`.toString()
+                        } catch (_: NoSuchMethodException) {
                         }
-                    } else {
-                        val it = tag.fields
-                        while (it.hasNext()) {
-                            val fField = it.next()
-                            val id = fField.id
-                            if (id != null && id.equals(uidFieldId, ignoreCase = true)) {
-                                try {
-                                    trackUID = fField.toString()
-                                    break
-                                } catch (_: Exception) {
-                                }
-                            }
-                        }
+                    } catch (_: Exception) {
                     }
-
-                    // For MP3 and OGG, also check COMMENT
-                    if (trackUID.isNullOrEmpty()) {
-                        val comment = tag.getFirst(FieldKey.COMMENT)
-                        if (!comment.isNullOrEmpty()) {
-                            trackUID = if (comment.startsWith("TrackUID:")) {
-                                comment.removePrefix("TrackUID:")
-                            } else {
-                                comment
+                } else {
+                    val it = tag.fields
+                    while (it.hasNext()) {
+                        val fField = it.next()
+                        val id = fField.id
+                        if (id != null && id.equals(uidFieldId, ignoreCase = true)) {
+                            try {
+                                trackUID = fField.toString()
+                                break
+                            } catch (_: Exception) {
                             }
                         }
                     }
                 }
 
-                val coverImage = if (includeArtwork) tag?.firstArtwork?.binaryData else null
-                val bitmap = if (coverImage != null) BitmapFactory.decodeByteArray(
-                    coverImage, 0, coverImage.size
-                ) else null
-
-                val downloadedTrack = DownloadedTrack(
-                    file, title, artist, album, year, bitrate, trackLength, bitmap, trackUID
-                )
-                data.add(downloadedTrack)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error reading file: " + e.message)
+                // For MP3 and OGG, also check COMMENT
+                if (trackUID.isNullOrEmpty()) {
+                    val comment = tag.getFirst(FieldKey.COMMENT)
+                    if (!comment.isNullOrEmpty()) {
+                        trackUID = if (comment.startsWith("TrackUID:")) {
+                            comment.removePrefix("TrackUID:")
+                        } else {
+                            comment
+                        }
+                    }
+                }
             }
+
+            val track = DownloadedTrack(file, title, artist, album, year, bitrate, trackLength, trackUID)
+            downloadedMetadata.put(file, CachedDownload(modified, size, track))
+            track
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not read download metadata for ${file.name}", e)
+            null
         }
-        return data
+    }
+
+    fun readDownloadArtwork(file: File): Bitmap? {
+        return try {
+            val bytes = AudioFileIO.read(file).tag?.firstArtwork?.binaryData ?: return null
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+            val maxDimension = maxOf(options.outWidth, options.outHeight)
+            options.inSampleSize = 1
+            while (maxDimension / options.inSampleSize > 512) options.inSampleSize *= 2
+            options.inJustDecodeBounds = false
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not read download artwork for ${file.name}", e)
+            null
+        }
     }
 
     fun deleteDownloadedTrack(context: Context, track: DownloadedTrack): Boolean {
@@ -1026,7 +1069,6 @@ object TrackDownloader {
         val year: String?,
         val bitrate: String?,
         val trackLength: String?,
-        val coverImage: Bitmap?,
         val trackUID: String?
     )
 }
