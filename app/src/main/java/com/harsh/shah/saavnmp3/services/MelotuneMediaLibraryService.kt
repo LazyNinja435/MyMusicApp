@@ -1,16 +1,11 @@
 package com.harsh.shah.saavnmp3.services
 
-import android.app.Notification
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
-import android.os.Build
-import android.os.Bundle
 import android.util.Log
 import androidx.annotation.OptIn
-import androidx.core.app.NotificationCompat
-import androidx.core.app.ServiceCompat
+import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -23,13 +18,15 @@ import androidx.media3.session.SessionError
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.MoreExecutors
 import com.google.common.util.concurrent.SettableFuture
 import com.harsh.shah.saavnmp3.R
 import com.harsh.shah.saavnmp3.activities.MainActivity
-import com.harsh.shah.saavnmp3.activities.MusicOverviewActivity
+import com.harsh.shah.saavnmp3.automotive.AutoTrackItem
 import com.harsh.shah.saavnmp3.automotive.MediaLibraryBrowser
 import com.harsh.shah.saavnmp3.automotive.MediaLibraryRepository
 import com.harsh.shah.saavnmp3.utils.MusicPlayerManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -89,61 +86,21 @@ class MelotuneMediaLibraryService : MediaLibraryService() {
         )
             .setSessionActivity(sessionActivityIntent)
             .build()
+            .also(::addSession)
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
         return mediaLibrarySession
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        ensureForegroundNotificationStarted()
-        val result = super.onStartCommand(intent, flags, startId)
-        mediaLibrarySession?.let { session ->
-            try {
-                onUpdateNotification(session, true)
-            } catch (e: Exception) {
-                Log.w(TAG, "onUpdateNotification in onStartCommand failed: ${e.message}")
-            }
-        }
-        return result
-    }
-
-    private fun ensureForegroundNotificationStarted() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        try {
-            val notification: Notification = NotificationCompat.Builder(this, MusicPlayerManager.CHANNEL_ID_1)
-                .setSmallIcon(R.drawable.headphone)
-                .setContentTitle(MusicPlayerManager.MUSIC_TITLE?.takeIf { it.isNotBlank() } ?: getString(R.string.app_name))
-                .setContentText(MusicPlayerManager.MUSIC_DESCRIPTION?.takeIf { it.isNotBlank() } ?: "Playing audio")
-                .setOngoing(true)
-                .setSilent(true)
-                .build()
-            val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-            } else {
-                0
-            }
-            ServiceCompat.startForeground(
-                this,
-                DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID,
-                notification,
-                fgsType
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "ensureForegroundNotificationStarted failed: ${e.message}")
-        }
-    }
-
     override fun onTaskRemoved(rootIntent: Intent?) {
-        super.onTaskRemoved(rootIntent)
         val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
         val playInBackground = prefs.getBoolean("play_in_background", true)
         val player = MusicPlayerManager.player
         if (!playInBackground || player == null || !player.playWhenReady) {
             Log.d(TAG, "onTaskRemoved: stopping playback (playInBackground=$playInBackground)")
             try {
-                player?.pause()
-                player?.stop()
+                MusicPlayerManager.stopPlayback()
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping player on task removed", e)
             }
@@ -153,7 +110,10 @@ class MelotuneMediaLibraryService : MediaLibraryService() {
 
     override fun onDestroy() {
         isRunning = false
-        mediaLibrarySession?.release()
+        mediaLibrarySession?.let {
+            removeSession(it)
+            it.release()
+        }
         mediaLibrarySession = null
         serviceScope.cancel()
         super.onDestroy()
@@ -240,6 +200,7 @@ class MelotuneMediaLibraryService : MediaLibraryService() {
         ): MediaSession.ConnectionResult {
             val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
             val playerCommands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
+                .remove(Player.COMMAND_CHANGE_MEDIA_ITEMS)
                 .add(Player.COMMAND_SEEK_TO_NEXT)
                 .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
                 .add(Player.COMMAND_SEEK_TO_PREVIOUS)
@@ -343,105 +304,62 @@ class MelotuneMediaLibraryService : MediaLibraryService() {
             return future
         }
 
-        override fun onAddMediaItems(
-            mediaSession: MediaSession,
-            controller: MediaSession.ControllerInfo,
-            mediaItems: MutableList<MediaItem>
-        ): ListenableFuture<MutableList<MediaItem>> {
-            val future = SettableFuture.create<MutableList<MediaItem>>()
-            val firstItem = mediaItems.firstOrNull()
-            if (firstItem == null) {
-                future.set(mediaItems)
-                return future
-            }
-
-            serviceScope.launch {
-                try {
-                    val (queueTracks, startIndex) = browser.resolveQueueForMediaItem(firstItem)
-                    val ids = queueTracks.map { it.localFilePath?.takeIf { path -> it.id == path } ?: it.id }
-                    val selectedTrack = queueTracks.getOrNull(startIndex)
-                    if (selectedTrack?.localFilePath != null) {
-                        MusicPlayerManager.trackQueue = ArrayList(ids)
-                        MusicPlayerManager.track_position = startIndex
-                        MusicPlayerManager.playLocalFile(
-                            filePath = selectedTrack.localFilePath,
-                            title = selectedTrack.title,
-                            artist = selectedTrack.artist,
-                            album = selectedTrack.album,
-                            trackUid = selectedTrack.id
-                        )
-                    } else if (ids.isNotEmpty()) {
-                        MusicPlayerManager.playFromQueue(ids, startIndex)
-                    }
-                    future.set(mediaItems)
-                } catch (e: Exception) {
-                    Log.e(TAG, "onAddMediaItems failed", e)
-                    future.set(mediaItems)
-                }
-            }
-            return future
-        }
-
         override fun onSetMediaItems(
             mediaSession: MediaSession,
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>,
             startIndex: Int,
             startPositionMs: Long
-        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
-            val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
-            val targetItem = mediaItems.getOrNull(startIndex.coerceAtLeast(0)) ?: mediaItems.firstOrNull()
-            if (targetItem == null) {
-                future.set(MediaSession.MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs))
-                return future
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = resolvePlayback {
+            val requested = mediaItems.getOrNull(startIndex.coerceAtLeast(0))
+                ?: throw IllegalArgumentException("No track selected")
+            val query = requested.requestMetadata.searchQuery
+            val (tracks, index) = if (!query.isNullOrBlank()) {
+                repository.searchTracks(query) to 0
+            } else {
+                browser.resolveQueueForMediaItem(requested)
             }
-
-            serviceScope.launch {
-                try {
-                    val (queueTracks, resolvedIdx) = browser.resolveQueueForMediaItem(targetItem)
-                    val ids = queueTracks.map { it.localFilePath?.takeIf { path -> it.id == path } ?: it.id }
-                    val selectedTrack = queueTracks.getOrNull(resolvedIdx)
-                    if (selectedTrack?.localFilePath != null) {
-                        MusicPlayerManager.trackQueue = ArrayList(ids)
-                        MusicPlayerManager.track_position = resolvedIdx
-                        MusicPlayerManager.playLocalFile(
-                            filePath = selectedTrack.localFilePath,
-                            title = selectedTrack.title,
-                            artist = selectedTrack.artist,
-                            album = selectedTrack.album,
-                            trackUid = selectedTrack.id
-                        )
-                    } else if (ids.isNotEmpty()) {
-                        MusicPlayerManager.playFromQueue(ids, resolvedIdx)
-                    }
-                    val currentItems = MusicPlayerManager.player?.currentMediaItem?.let { listOf(it) } ?: mediaItems
-                    future.set(MediaSession.MediaItemsWithStartPosition(currentItems, 0, startPositionMs))
-                } catch (e: Exception) {
-                    Log.e(TAG, "onSetMediaItems failed", e)
-                    future.set(MediaSession.MediaItemsWithStartPosition(mediaItems, startIndex, startPositionMs))
-                }
-            }
-            return future
+            resolveQueue(tracks, index, startPositionMs)
         }
 
         override fun onPlaybackResumption(
             mediaSession: MediaSession,
-            controller: MediaSession.ControllerInfo
+            controller: MediaSession.ControllerInfo,
+            isForPlayback: Boolean
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = resolvePlayback {
+            resolveQueue(repository.getRecentlyPlayed(), 0, C.TIME_UNSET)
+        }
+
+        private suspend fun resolveQueue(
+            tracks: List<AutoTrackItem>,
+            index: Int,
+            startPositionMs: Long
+        ): MediaSession.MediaItemsWithStartPosition {
+            val selected = tracks.getOrNull(index)
+                ?: throw IllegalArgumentException("No tracks available")
+            val queueIds = tracks.map { it.localFilePath ?: it.id }
+            val item = MusicPlayerManager.resolveMediaItem(
+                queueIds[index], queueIds, index, selected.takeIf { it.localFilePath != null }
+            ) ?: throw IllegalArgumentException("No playable source for ${selected.id}")
+            return MediaSession.MediaItemsWithStartPosition(listOf(item), 0, startPositionMs)
+        }
+
+        private fun resolvePlayback(
+            block: suspend () -> MediaSession.MediaItemsWithStartPosition
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
             val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
-            serviceScope.launch {
-                val recent = repository.getRecentlyPlayed()
-                if (recent.isNotEmpty()) {
-                    val ids = recent.map { it.id }
-                    MusicPlayerManager.playFromQueue(ids, 0)
-                    val item = MusicPlayerManager.player?.currentMediaItem
-                    if (item != null) {
-                        future.set(MediaSession.MediaItemsWithStartPosition(listOf(item), 0, 0L))
-                        return@launch
-                    }
+            val job = serviceScope.launch {
+                try {
+                    future.set(block())
+                } catch (e: CancellationException) {
+                    future.cancel(false)
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not resolve playback request", e)
+                    future.setException(e)
                 }
-                future.setException(UnsupportedOperationException("No recent tracks to resume"))
             }
+            future.addListener({ if (future.isCancelled) job.cancel() }, MoreExecutors.directExecutor())
             return future
         }
     }

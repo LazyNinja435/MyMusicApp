@@ -28,7 +28,6 @@ class MediaLibraryBrowser(private val dataSource: MediaLibraryDataSource) {
         const val PREFIX_DOWNLOAD = "download:"
 
         const val EXTRA_CONTEXT_PARENT_ID = "melotune.context_parent_id"
-        const val EXTRA_LOCAL_FILE_PATH = "melotune.local_file_path"
         const val EXTRA_SONG_ID = "melotune.song_id"
     }
 
@@ -116,19 +115,18 @@ class MediaLibraryBrowser(private val dataSource: MediaLibraryDataSource) {
     suspend fun resolveQueueForMediaItem(mediaItem: MediaItem): Pair<List<AutoTrackItem>, Int> {
         val mediaId = mediaItem.mediaId
         val extras = mediaItem.mediaMetadata.extras
-        val parentId = extras?.getString(EXTRA_CONTEXT_PARENT_ID)
+        val parentId = mediaId.substringAfter("?parent=", "").takeIf { it.isNotEmpty() }
+            ?.let(Uri::decode) ?: extras?.getString(EXTRA_CONTEXT_PARENT_ID)
 
         if (mediaId.startsWith(PREFIX_DOWNLOAD)) {
             val downloads = dataSource.getDownloadedTracks()
             val targetKey = mediaId.removePrefix(PREFIX_DOWNLOAD)
             val idx = downloads.indexOfFirst { it.id == targetKey || it.localFilePath == targetKey }
-            if (downloads.isNotEmpty()) {
-                return downloads to if (idx >= 0) idx else 0
-            }
+            return if (idx >= 0) downloads to idx else emptyList<AutoTrackItem>() to 0
         }
 
         val songId = when {
-            mediaId.startsWith(PREFIX_SONG) -> mediaId.removePrefix(PREFIX_SONG)
+            mediaId.startsWith(PREFIX_SONG) -> Uri.decode(mediaId.removePrefix(PREFIX_SONG).substringBefore("?parent="))
             else -> extras?.getString(EXTRA_SONG_ID) ?: mediaId
         }
 
@@ -139,6 +137,7 @@ class MediaLibraryBrowser(private val dataSource: MediaLibraryDataSource) {
                 NODE_RECOMMENDED -> dataSource.getRecommendedSongs()
                 TAB_DOWNLOADS -> dataSource.getDownloadedTracks()
                 else -> when {
+                    parentId.startsWith("search:") -> dataSource.searchTracks(parentId.removePrefix("search:"))
                     parentId.startsWith(PREFIX_PLAYLIST) -> dataSource.getPlaylistTracks(parentId.removePrefix(PREFIX_PLAYLIST))
                     parentId.startsWith(PREFIX_ALBUM) -> dataSource.getAlbumTracks(parentId.removePrefix(PREFIX_ALBUM))
                     parentId.startsWith(PREFIX_ARTIST) -> dataSource.getArtistTracks(parentId.removePrefix(PREFIX_ARTIST))
@@ -156,18 +155,17 @@ class MediaLibraryBrowser(private val dataSource: MediaLibraryDataSource) {
             title = mediaItem.mediaMetadata.title?.toString() ?: "Melotune",
             artist = mediaItem.mediaMetadata.artist?.toString() ?: "Melotune",
             album = mediaItem.mediaMetadata.albumTitle?.toString(),
-            artworkUrl = mediaItem.mediaMetadata.artworkUri?.toString(),
-            localFilePath = extras?.getString(EXTRA_LOCAL_FILE_PATH)
+            artworkUrl = mediaItem.mediaMetadata.artworkUri?.toString()
         )
         return listOf(fallbackTrack) to 0
     }
 
     private fun paginate(items: List<MediaItem>, page: Int, pageSize: Int): List<MediaItem> {
         if (page < 0 || pageSize <= 0) return items
-        val fromIndex = page * pageSize
+        val fromIndex = page.toLong() * pageSize
         if (fromIndex >= items.size) return emptyList()
-        val toIndex = minOf(fromIndex + pageSize, items.size)
-        return items.subList(fromIndex, toIndex)
+        val toIndex = minOf(fromIndex + pageSize, items.size.toLong())
+        return items.subList(fromIndex.toInt(), toIndex.toInt())
     }
 
     private fun browsableFolder(id: String, title: String, mediaType: Int): MediaItem {
@@ -232,9 +230,6 @@ class MediaLibraryBrowser(private val dataSource: MediaLibraryDataSource) {
         val extras = Bundle().apply {
             putString(EXTRA_CONTEXT_PARENT_ID, parentId)
             putString(EXTRA_SONG_ID, id)
-            if (!localFilePath.isNullOrBlank()) {
-                putString(EXTRA_LOCAL_FILE_PATH, localFilePath)
-            }
         }
         val metadata = MediaMetadata.Builder()
             .setTitle(title)
@@ -247,7 +242,7 @@ class MediaLibraryBrowser(private val dataSource: MediaLibraryDataSource) {
             .setExtras(extras)
             .build()
         return MediaItem.Builder()
-            .setMediaId("$PREFIX_SONG$id")
+            .setMediaId("$PREFIX_SONG${Uri.encode(id)}?parent=${Uri.encode(parentId)}")
             .setMediaMetadata(metadata)
             .build()
     }
@@ -256,9 +251,6 @@ class MediaLibraryBrowser(private val dataSource: MediaLibraryDataSource) {
         val extras = Bundle().apply {
             putString(EXTRA_CONTEXT_PARENT_ID, parentId)
             putString(EXTRA_SONG_ID, id)
-            if (!localFilePath.isNullOrBlank()) {
-                putString(EXTRA_LOCAL_FILE_PATH, localFilePath)
-            }
         }
         val metadata = MediaMetadata.Builder()
             .setTitle(title)

@@ -480,7 +480,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
 
             _binding.goToAlbum.setOnClickListener(View.OnClickListener {
                 if (mSongResponse == null) return@OnClickListener
-                val song = mSongResponse!!.data?.get(0)
+                val song = mSongResponse?.data?.firstOrNull()
                 if (song?.album == null) return@OnClickListener
                 val album = song.album
                 startActivity(
@@ -513,7 +513,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
                 materialAlertDialogBuilder.show()
             })
 
-            val song = mSongResponse!!.data?.get(0) ?: return@OnClickListener
+            val song = mSongResponse?.data?.firstOrNull() ?: return@OnClickListener
 
             val currentId = MusicPlayerManager.MUSIC_ID ?: ID_FROM_EXTRA
             val isLiked = if (!currentId.isNullOrEmpty()) {
@@ -624,7 +624,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
                 ).show()
                 // Objects.requireNonNull(menuItem.getTitle());
                 MusicPlayerManager.setTrackQuality(menuItem.title.toString())
-                onSongFetched(mSongResponse!!, true)
+                mSongResponse?.let { onSongFetched(it, true) }
                 prepareMediaPLayer()
                 binding!!.trackQuality.text = MusicPlayerManager.TRACK_QUALITY
                 true
@@ -656,7 +656,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
                 // index = i;
                 Log.i(TAG, "pickedLibrary: $i")
 
-                val song = mSongResponse!!.data?.get(0) ?: return@OnClickListener
+                val song = mSongResponse?.data?.firstOrNull() ?: return@OnClickListener
 
                 val songs = Library.Songs(
                     song.id,
@@ -775,6 +775,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
                     response: String?,
                     responseHeaders: HashMap<String?, Any?>?
                 ) {
+                    if (ID_FROM_EXTRA != ID || isFinishing || isDestroyed) return
                     val songResponse = try {
                         Gson().fromJson<SongResponse>(response, SongResponse::class.java)
                     } catch (e: Exception) {
@@ -799,6 +800,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
                 }
 
                 override fun onErrorResponse(tag: String?, message: String?) {
+                    if (ID_FROM_EXTRA != ID || isFinishing || isDestroyed) return
                     val cached = SharedPreferenceManager.getInstance(this@MusicOverviewActivity).getSongResponseById(ID)
                     if (cached != null) {
                         onSongFetched(cached)
@@ -814,11 +816,10 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
 
         val shouldClearQueue = !isActivityRecreated && !isSameSongActive && intent.extras?.getString("type", "") == "clear"
 
-        if (shouldClearQueue) {
-            MusicPlayerManager.trackQueue = ArrayList(mutableListOf<String?>(ID))
+        if (ID.isNotBlank() && (shouldClearQueue || MusicPlayerManager.trackQueue.isNullOrEmpty())) {
+            MusicPlayerManager.trackQueue = arrayListOf(ID)
+            MusicPlayerManager.track_position = 0
             intent.removeExtra("type")
-        } else if (MusicPlayerManager.trackQueue.isNullOrEmpty() && ID.isNotEmpty()) {
-            MusicPlayerManager.trackQueue = ArrayList(mutableListOf<String?>(ID))
         }
         if ((ID.startsWith("http") || ID.startsWith("www")) && ID.contains("jiosaavn.com")) {
             apiManager.retrieveSongByLink(ID, requestListener)
@@ -835,9 +836,9 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
     private var mSongResponse: SongResponse? = null
 
     private fun onSongFetched(songResponse: SongResponse, forced: Boolean = false) {
+        if (isFinishing || isDestroyed) return
+        val song = songResponse.data?.firstOrNull() ?: return
         mSongResponse = songResponse
-        MusicPlayerManager.CURRENT_TRACK = mSongResponse
-        val song = songResponse.data?.get(0) ?: return
         binding!!.title.text = song.name()
         binding!!.description.text = String.format(
             "%s plays | %s | %s",
@@ -886,10 +887,12 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
             shouldPlay = true
         }
 
-        if (shouldPlay) {
+        if (shouldPlay && !SONG_URL.isNullOrBlank()) {
+            MusicPlayerManager.CURRENT_TRACK = songResponse
             MusicPlayerManager.setMusicDetails(
                 IMAGE_URL, binding!!.title.text.toString(),
-                binding!!.description.text.toString(), ID_FROM_EXTRA
+                binding!!.description.text.toString(),
+                if (forced) MusicPlayerManager.currentlyPlayingTrackId ?: ID_FROM_EXTRA else ID_FROM_EXTRA
             )
             MusicPlayerManager.SONG_URL = SONG_URL
             prepareMediaPLayer()
@@ -910,7 +913,10 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
         fetchLyricsForCurrentSong(song)
     }
 
+    private var lyricsJob: kotlinx.coroutines.Job? = null
+
     private fun fetchLyricsForCurrentSong(song: SongResponse.Song) {
+        lyricsJob?.cancel()
         val wasVisible = binding!!.lyricsRecycler.isVisible
 
         binding!!.lyricsIcon.visibility = View.GONE
@@ -928,7 +934,7 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
         val durationInSecs = (song.duration ?: -1.0).toInt()
         val artistName = if (!song.artists?.primary.isNullOrEmpty()) song.artists.primary[0]?.name() ?: "" else ""
         
-        lifecycleScope.launch(Dispatchers.IO) {
+        lyricsJob = lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val fetchedLyrics = com.samyak.lrclib.LrcLib.getLyrics(
                     title = song.name(),
@@ -1250,20 +1256,35 @@ class MusicOverviewActivity : AppCompatActivity(), ActionPlaying, ServiceConnect
     private val mHandler = Handler(Looper.getMainLooper())
     private val mUpdateTimeTask = Runnable { this.updateTrackInfo() }
     private var lastLoadedImageUrl: String? = null
+    private var shownPlayingTrackId: String? = null
 
     private fun updateTrackInfo() {
         mHandler.removeCallbacks(mUpdateTimeTask)
         if (isFinishing || isDestroyed || binding == null) return
 
-        val currentTitle = binding!!.title.text.toString()
-        if (currentTitle != MusicPlayerManager.MUSIC_TITLE) {
-            binding!!.title.text = MusicPlayerManager.MUSIC_TITLE
-
-            val currentTrackData = MusicPlayerManager.CURRENT_TRACK?.data?.getOrNull(0)
-            if (currentTrackData != null && currentTitle.isNotEmpty()) {
-                fetchLyricsForCurrentSong(currentTrackData)
+        val currentId = MusicPlayerManager.currentlyPlayingTrackId
+        if (currentId != null && currentId != shownPlayingTrackId) {
+            shownPlayingTrackId = currentId
+            val response = MusicPlayerManager.CURRENT_TRACK
+            mSongResponse = response
+            val song = response?.data?.firstOrNull()
+            SHARE_URL = song?.url.orEmpty()
+            SONG_URL = MusicPlayerManager.SONG_URL.orEmpty()
+            IMAGE_URL = MusicPlayerManager.IMAGE_URL
+            artistsList = song?.artists?.primary?.filterNotNull()?.toMutableList() ?: mutableListOf()
+            if (song != null) {
+                updateDownloadButtonUI(song.name())
+                fetchLyricsForCurrentSong(song)
+            } else {
+                lyricsJob?.cancel()
+                lyricsAdapter = null
+                currentLyricsRecyclerView = null
+                binding!!.lyricsIcon.visibility = View.GONE
+                binding!!.lyricsRecycler.visibility = View.GONE
+                binding!!.coverImageCard.visibility = View.VISIBLE
             }
         }
+        binding!!.title.text = MusicPlayerManager.MUSIC_TITLE
 
         if (binding!!.description.text.toString() != MusicPlayerManager.MUSIC_DESCRIPTION) {
             binding!!.description.text = MusicPlayerManager.MUSIC_DESCRIPTION

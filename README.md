@@ -77,6 +77,8 @@ Melotune exposes a Media3 `MediaLibraryService` (`MelotuneMediaLibraryService`) 
 - Browseable library tree: **Home** (Recently Played, Favorites, Recommended Songs), **Playlists** (User-Created & Imported YouTube Playlists), **Albums**, **Artists**, and **Downloads** (offline playback).
 - Native car-side playback controls, queue management, shuffle/repeat, voice/text catalog search, and synchronized state with the phone UI.
 
+For a GitHub APK installed directly on your phone, enable **Unknown sources** in Android Auto's own developer settings so Android Auto can list Melotune. Reconnect to the car after changing the setting. See [Android Auto's developer testing instructions](https://developer.android.com/training/cars/testing#unknown-sources).
+
 To test with the Android Auto Desktop Head Unit (DHU):
 1. Enable Developer Mode in the Android Auto app on your phone/emulator and start the Head Unit Server.
 2. Forward the DHU port: `adb forward tcp:5277 tcp:5277`.

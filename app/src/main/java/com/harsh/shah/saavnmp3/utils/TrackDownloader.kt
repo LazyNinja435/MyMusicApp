@@ -137,7 +137,7 @@ object TrackDownloader {
         return false
     }
 
-    fun getDownloadedTracks(context: Context): MutableList<DownloadedTrack?> {
+    fun getDownloadedTracks(context: Context, includeArtwork: Boolean = true): MutableList<DownloadedTrack?> {
         val data: MutableList<DownloadedTrack?> = ArrayList()
         val musicDir = File(
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
@@ -206,7 +206,7 @@ object TrackDownloader {
                     }
                 }
 
-                val coverImage = if (tag != null) tag.firstArtwork?.binaryData else null
+                val coverImage = if (includeArtwork) tag?.firstArtwork?.binaryData else null
                 val bitmap = if (coverImage != null) BitmapFactory.decodeByteArray(
                     coverImage, 0, coverImage.size
                 ) else null

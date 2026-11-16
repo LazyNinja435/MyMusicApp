@@ -13,7 +13,9 @@ import com.harsh.shah.saavnmp3.records.SongSearch
 import com.harsh.shah.saavnmp3.records.sharedpref.SavedLibraries
 import com.harsh.shah.saavnmp3.utils.SharedPreferenceManager
 import com.harsh.shah.saavnmp3.utils.TrackDownloader
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.coroutines.resume
 
@@ -120,9 +122,9 @@ class MediaLibraryRepository(
         }
     }
 
-    override suspend fun getDownloadedTracks(): List<AutoTrackItem> {
-        return try {
-            TrackDownloader.getDownloadedTracks(context).filterNotNull().mapNotNull { dt ->
+    override suspend fun getDownloadedTracks(): List<AutoTrackItem> = withContext(Dispatchers.IO) {
+        try {
+            TrackDownloader.getDownloadedTracks(context, includeArtwork = false).filterNotNull().mapNotNull { dt ->
                 val file = dt.file ?: return@mapNotNull null
                 if (!file.exists()) return@mapNotNull null
                 val path = file.absolutePath

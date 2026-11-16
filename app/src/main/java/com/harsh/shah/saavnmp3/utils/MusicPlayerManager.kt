@@ -9,10 +9,11 @@ import android.graphics.Color
 import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import androidx.annotation.OptIn
-import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -22,6 +23,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.util.Util
 import androidx.media3.database.ExoDatabaseProvider
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
@@ -35,6 +37,7 @@ import com.harsh.shah.saavnmp3.widgets.WidgetVinylProvider
 import com.harsh.shah.saavnmp3.BaseApplicationClass
 import com.harsh.shah.saavnmp3.R
 import com.harsh.shah.saavnmp3.activities.MusicOverviewActivity
+import com.harsh.shah.saavnmp3.automotive.AutoTrackItem
 import com.harsh.shah.saavnmp3.network.ApiManager
 import com.harsh.shah.saavnmp3.network.utility.RequestNetwork
 import com.harsh.shah.saavnmp3.records.SongResponse
@@ -43,7 +46,16 @@ import com.harsh.shah.saavnmp3.widgets.WidgetPlayerProvider
 import com.bumptech.glide.Glide
 import com.bumptech.glide.request.target.CustomTarget
 import com.bumptech.glide.request.transition.Transition
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.coroutines.resume
 import java.util.concurrent.CopyOnWriteArraySet
 
 @OptIn(UnstableApi::class)
@@ -107,6 +119,17 @@ object MusicPlayerManager {
     var isTransitioning: Boolean = false
     private var wakeLock: PowerManager.WakeLock? = null
     private var autoplayRequestId: Long = 0L
+    private val playbackScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var trackRequest: Job? = null
+    private var playbackGeneration = 0L
+
+    private data class ResolvedTrack(
+        val response: SongResponse?,
+        val description: String,
+        val queueIds: List<String>?,
+        val queueIndex: Int
+    )
 
     fun acquireWakeLock(timeoutMs: Long = 30000L) {
         try {
@@ -165,7 +188,9 @@ object MusicPlayerManager {
         }
 
         player = ExoPlayer.Builder(appContext!!)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(mediaDataSourceFactory))
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(DefaultDataSource.Factory(context, mediaDataSourceFactory))
+            )
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setAudioAttributes(
@@ -186,13 +211,25 @@ object MusicPlayerManager {
                         releaseWakeLock()
                         updateWidget()
                     }
-                    Player.STATE_ENDED -> {
-                        nextTrack()
-                    }
+                    Player.STATE_ENDED -> scheduleAutomaticAdvance()
                     else -> {
                         updateWidget()
                     }
                 }
+            }
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
+                    // ExoPlayer has one item. Repeat-all must advance the app queue.
+                    if (player?.repeatMode == Player.REPEAT_MODE_ALL &&
+                        trackQueue.orEmpty().count { !it.isNullOrBlank() } > 1
+                    ) {
+                        scheduleAutomaticAdvance(repeated = true)
+                    }
+                    return
+                }
+                val track = mediaItem?.localConfiguration?.tag as? ResolvedTrack ?: return
+                applyResolvedTrack(mediaItem, track)
             }
 
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
@@ -218,8 +255,25 @@ object MusicPlayerManager {
         createNotificationChannel()
     }
 
+    private fun scheduleAutomaticAdvance(repeated: Boolean = false) {
+        val generation = playbackGeneration
+        mainHandler.post {
+            val p = player ?: return@post
+            val atTrackBoundary = if (repeated) {
+                p.repeatMode == Player.REPEAT_MODE_ALL
+            } else {
+                p.playbackState == Player.STATE_ENDED
+            }
+            if (generation == playbackGeneration && trackRequest?.isActive != true &&
+                atTrackBoundary && p.playWhenReady
+            ) {
+                advanceTrack(automatic = true)
+            }
+        }
+    }
+
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.O) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID_1, "Media Controls",
                 NotificationManager.IMPORTANCE_DEFAULT
@@ -309,15 +363,9 @@ object MusicPlayerManager {
         val ctx = appContext ?: return
         if (MelotuneMediaLibraryService.isRunning) return
         try {
-            val intent = Intent(ctx, MelotuneMediaLibraryService::class.java)
-            ctx.startService(intent)
-        } catch (e: Exception) {
-            try {
-                val intent = Intent(ctx, MelotuneMediaLibraryService::class.java)
-                ContextCompat.startForegroundService(ctx, intent)
-            } catch (fgEx: Exception) {
-                Log.w(TAG, "Unable to start MelotuneMediaLibraryService: ${fgEx.message}")
-            }
+            ctx.startService(Intent(ctx, MelotuneMediaLibraryService::class.java))
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "Unable to start media service from the background", e)
         }
     }
 
@@ -337,7 +385,7 @@ object MusicPlayerManager {
             p.pause()
         } else {
             if (p.playbackState == Player.STATE_IDLE) {
-                prepareMediaPlayer()
+                if (!SONG_URL.isNullOrBlank()) prepareMediaPlayer() else playTrack()
             } else if (p.playbackState == Player.STATE_ENDED) {
                 p.seekTo(0)
                 p.play()
@@ -352,17 +400,10 @@ object MusicPlayerManager {
 
     fun prepareMediaPlayer() {
         val p = player ?: return
-        if (p.isPlaying) p.stop()
-        p.clearMediaItems()
-        if (SONG_URL.isNullOrEmpty()) return
-        acquireWakeLock(15000L)
-
-        var finalUrl = SONG_URL ?: ""
-        val isLocalFile = finalUrl.startsWith("file://") || finalUrl.startsWith("/")
-        if (!isLocalFile && finalUrl.startsWith("http:")) {
-            finalUrl = finalUrl.replace("http:", "https:")
-        }
-        val mediaUri = if (finalUrl.startsWith("/")) Uri.fromFile(File(finalUrl)) else Uri.parse(finalUrl)
+        val url = SONG_URL?.takeIf { it.isNotBlank() } ?: return
+        trackRequest?.cancel()
+        cancelAutoplay()
+        val mediaUri = if (url.startsWith("/")) Uri.fromFile(File(url)) else Uri.parse(url)
 
         val currentSong = CURRENT_TRACK?.data?.firstOrNull()
         val artistText = currentSong?.artists?.primary?.mapNotNull { it?.name() }?.joinToString(", ")
@@ -382,18 +423,23 @@ object MusicPlayerManager {
 
         val mediaItem = MediaItem.Builder()
             .setUri(mediaUri)
-            .setMediaId(MUSIC_ID ?: finalUrl)
+            .setMediaId(MUSIC_ID ?: url)
             .setMediaMetadata(metadata)
             .build()
 
-        isTrackDownloaded = isLocalFile
+        isTrackDownloaded = mediaUri.scheme == "file"
         currentlyPlayingTrackId = MUSIC_ID
-        p.setMediaItem(mediaItem)
-        p.playWhenReady = true
-        p.prepare()
+        startMediaItem(p, mediaItem)
+    }
+
+    private fun startMediaItem(player: Player, mediaItem: MediaItem) {
+        playbackGeneration++
+        acquireWakeLock(15000L)
         ensureMediaServiceStarted()
+        player.setMediaItem(mediaItem)
+        player.prepare()
+        player.play()
         showNotification()
-        updateWidget()
     }
 
     fun playFromQueue(songIds: List<String>, startIndex: Int = 0) {
@@ -404,26 +450,6 @@ object MusicPlayerManager {
         track_position = safeIndex
         MUSIC_ID = songIds[safeIndex]
         playTrack()
-    }
-
-    fun playLocalFile(
-        filePath: String,
-        title: String,
-        artist: String,
-        album: String? = null,
-        trackUid: String? = null
-    ) {
-        val file = File(filePath)
-        if (!file.exists()) return
-        cancelAutoplay()
-        MUSIC_ID = trackUid ?: filePath
-        MUSIC_TITLE = title
-        MUSIC_DESCRIPTION = artist
-        SONG_URL = file.absolutePath
-        IMAGE_URL = ""
-        CURRENT_TRACK = null
-        setMusicDetails(IMAGE_URL, MUSIC_TITLE, album?.takeIf { it.isNotBlank() } ?: artist, MUSIC_ID)
-        prepareMediaPlayer()
     }
 
     fun playNext(trackId: String?) {
@@ -465,136 +491,183 @@ object MusicPlayerManager {
         updateWidget()
     }
 
-    private fun tryPlayOfflineMatch(ctx: Context, trackId: String): Boolean {
-        return try {
-            val downloaded = TrackDownloader.getDownloadedTracks(ctx).filterNotNull()
-            val match = downloaded.firstOrNull { it.trackUID == trackId || it.file?.absolutePath == trackId }
-            val file = match?.file
-            if (match != null && file != null && file.exists()) {
-                playLocalFile(
-                    filePath = file.absolutePath,
-                    title = match.title ?: "Downloaded Track",
-                    artist = match.artist ?: "Unknown Artist",
-                    album = match.album,
-                    trackUid = match.trackUID ?: trackId
-                )
-                isTransitioning = false
-                releaseWakeLock()
-                true
-            } else {
-                false
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Offline match lookup failed: ${e.message}")
-            false
+    internal suspend fun resolveMediaItem(
+        trackId: String,
+        queueIds: List<String>? = null,
+        queueIndex: Int = 0,
+        download: AutoTrackItem? = null
+    ): MediaItem? {
+        val context = appContext ?: return null
+        val isFile = trackId.startsWith("/") || trackId.startsWith("file://")
+        val response = if (download == null && !isFile) {
+            val cached = sharedPreferenceManager?.getSongResponseById(trackId)
+            cached?.takeIf { playableSong(it) != null } ?: fetchSong(context, trackId)
+        } else {
+            null
+        }
+        val song = playableSong(response)
+        val offlineTrack = download ?: if (song == null) findDownloadedTrack(context, trackId) else null
+        val file = offlineTrack?.localFilePath?.let(::File)?.takeIf { it.isFile }
+        val uri = when {
+            file != null -> Uri.fromFile(file)
+            song != null -> Uri.parse(getDownloadUrl(song.downloadUrl))
+            else -> return null
+        }
+        val title = song?.name() ?: offlineTrack?.title
+        val artists = song?.artists?.primary?.mapNotNull { it?.name() }?.joinToString(", ")
+            ?.takeIf { it.isNotBlank() } ?: offlineTrack?.artist
+        val artwork = song?.image?.lastOrNull()?.url ?: offlineTrack?.artworkUrl
+        val description = if (song != null) {
+            "${MusicOverviewActivity.convertPlayCount(song.playCount ?: 0)} plays | ${song.year} | ${song.copyright}"
+        } else {
+            artists.orEmpty()
+        }
+        val metadata = MediaMetadata.Builder()
+            .setTitle(title)
+            .setArtist(artists)
+            .setAlbumTitle(song?.album?.name() ?: offlineTrack?.album)
+            .setArtworkUri(artwork?.takeIf { it.isNotBlank() }?.let(Uri::parse))
+            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+            .build()
+        return MediaItem.Builder()
+            .setMediaId(trackId)
+            .setUri(uri)
+            .setMediaMetadata(metadata)
+            .setTag(ResolvedTrack(response?.takeIf { song != null }, description, queueIds, queueIndex))
+            .build()
+    }
+
+    private fun playableSong(response: SongResponse?): SongResponse.Song? {
+        if (response?.success != true) return null
+        return response.data?.firstOrNull()?.takeIf {
+            Uri.parse(getDownloadUrl(it.downloadUrl)).scheme in listOf("http", "https")
         }
     }
 
+    private suspend fun fetchSong(context: Context, trackId: String): SongResponse? =
+        suspendCancellableCoroutine { continuation ->
+            ApiManager(context).retrieveSongById(trackId, null, object : RequestNetwork.RequestListener {
+                override fun onResponse(tag: String?, response: String?, responseHeaders: HashMap<String?, Any?>?) {
+                    if (!continuation.isActive) return
+                    val song = runCatching { Gson().fromJson(response, SongResponse::class.java) }
+                    continuation.resume(song.getOrNull())
+                }
+
+                override fun onErrorResponse(tag: String?, message: String?) {
+                    if (continuation.isActive) continuation.resume(null)
+                }
+            })
+        }
+
+    private suspend fun findDownloadedTrack(context: Context, trackId: String): AutoTrackItem? =
+        withContext(Dispatchers.IO) {
+            val path = if (trackId.startsWith("file://")) Uri.parse(trackId).path else trackId
+            val match = TrackDownloader.getDownloadedTracks(context, includeArtwork = false)
+                .filterNotNull().firstOrNull { it.trackUID == trackId || it.file?.absolutePath == path }
+            val file = match?.file ?: return@withContext null
+            AutoTrackItem(trackId, match.title ?: file.nameWithoutExtension, match.artist.orEmpty(),
+                match.album, localFilePath = file.absolutePath)
+        }
+
+    private fun applyResolvedTrack(item: MediaItem, track: ResolvedTrack) {
+        playbackGeneration++
+        if (track.queueIds != null) {
+            trackRequest?.cancel()
+            cancelAutoplay()
+            trackQueue = ArrayList(track.queueIds)
+            track_position = track.queueIndex
+        }
+
+        CURRENT_TRACK = track.response
+        SONG_URL = item.localConfiguration?.uri?.toString()
+        isTrackDownloaded = item.localConfiguration?.uri?.scheme == "file"
+        currentlyPlayingTrackId = item.mediaId
+        setMusicDetails(item.mediaMetadata.artworkUri?.toString().orEmpty(),
+            item.mediaMetadata.title?.toString().orEmpty(), track.description, item.mediaId)
+        notifyPlaybackListeners()
+
+        val song = track.response?.data?.firstOrNull() ?: return
+        val artist = song.artists?.primary?.firstOrNull()
+        val artists = song.artists?.all?.mapNotNull { it?.name() }?.joinToString(", ").orEmpty()
+        sharedPreferenceManager?.addRecentlyPlayed(
+            com.harsh.shah.saavnmp3.records.sharedpref.SavedLibraries.Library.Songs(
+                song.id, song.name(), artists, IMAGE_URL
+            ),
+            artistId = artist?.id,
+            artistName = artist?.name()
+        )
+    }
+
     fun playTrack() {
-        if (MUSIC_ID.isNullOrEmpty()) {
-            isTransitioning = false
-            releaseWakeLock()
-            return
-        }
+        val targetId = MUSIC_ID?.takeIf { it.isNotBlank() } ?: return
+        val p = player ?: return
         cancelAutoplay()
+        trackRequest?.cancel()
+        playbackGeneration++
         isTransitioning = true
-        acquireWakeLock(30000L)
-
-        val ctx = BaseApplicationClass.currentActivity ?: appContext ?: return
-        val targetId = MUSIC_ID!!
-        if (targetId.startsWith("/") || targetId.startsWith("file://")) {
-            if (tryPlayOfflineMatch(ctx, targetId)) return
-        }
-
-        ApiManager(ctx).retrieveSongById(targetId, null, object : RequestNetwork.RequestListener {
-            override fun onResponse(tag: String?, response: String?, responseHeaders: HashMap<String?, Any?>?) {
-                val songResponse = try {
-                    Gson().fromJson(response, SongResponse::class.java)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to parse song response for $targetId: ${e.message}")
-                    null
-                }
-                if (songResponse != null && songResponse.success && !songResponse.data.isNullOrEmpty()) {
-                    CURRENT_TRACK = songResponse
-                    val firstSong = songResponse.data[0] ?: return
-                    MUSIC_TITLE = firstSong.name()
-                    MUSIC_DESCRIPTION = "${MusicOverviewActivity.convertPlayCount(firstSong.playCount ?: 0)} plays | ${firstSong.year} | ${firstSong.copyright}"
-                    firstSong.image?.lastOrNull()?.url?.let { IMAGE_URL = it }
-                    SONG_URL = getDownloadUrl(firstSong.downloadUrl)
-                    setMusicDetails(IMAGE_URL, MUSIC_TITLE, MUSIC_DESCRIPTION, MUSIC_ID)
-                    prepareMediaPlayer()
-
-                    // Record to recently played history
-                    val primaryArtist = firstSong.artists?.primary?.firstOrNull()
-                    val artistsStr = firstSong.artists?.all?.joinToString(", ") { it?.name() ?: "" } ?: ""
-                    sharedPreferenceManager?.addRecentlyPlayed(
-                        com.harsh.shah.saavnmp3.records.sharedpref.SavedLibraries.Library.Songs(
-                            firstSong.id,
-                            firstSong.name(),
-                            artistsStr,
-                            IMAGE_URL
-                        ),
-                        artistId = primaryArtist?.id,
-                        artistName = primaryArtist?.name()
-                    )
+        acquireWakeLock()
+        trackRequest = playbackScope.launch {
+            try {
+                val item = resolveMediaItem(targetId)
+                if (item != null) {
+                    startMediaItem(p, item)
                 } else {
-                    if (!tryPlayOfflineMatch(ctx, targetId)) {
-                        isTransitioning = false
-                        releaseWakeLock()
-                    }
+                    Log.w(TAG, "No playable source for $targetId")
+                    MUSIC_ID = currentlyPlayingTrackId
+                    track_position = trackQueue?.indexOf(MUSIC_ID) ?: -1
+                    showNotification()
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Could not play $targetId", e)
+            } finally {
+                isTransitioning = false
+                releaseWakeLock()
             }
-            override fun onErrorResponse(tag: String?, message: String?) {
-                if (!tryPlayOfflineMatch(ctx, targetId)) {
-                    isTransitioning = false
-                    releaseWakeLock()
-                }
-            }
-        })
+        }
     }
 
     private var isFetchingAutoplay = false
 
     private fun fetchAndAppendAutoplayRecommendations(currentSong: SongResponse.Song) {
         if (isFetchingAutoplay) return
+        val ctx = appContext ?: return
+        val playingId = currentlyPlayingTrackId ?: return
         isFetchingAutoplay = true
-        val currentRequestId = ++autoplayRequestId
-        val currentSongId = currentSong.id ?: return
-        val currentPosSnapshot = track_position
-        val ctx = appContext ?: BaseApplicationClass.currentActivity ?: return
+        val requestId = ++autoplayRequestId
+        val currentPosition = track_position
 
-        RecommendationManager.getRecommendationsForSong(ctx, currentSong, limit = 10) { recommendedSongs ->
+        RecommendationManager.getRecommendationsForSong(ctx, currentSong, limit = 10) { recommendations ->
+            if (requestId != autoplayRequestId) return@getRecommendationsForSong
             isFetchingAutoplay = false
-            // Verify that this autoplay callback is still valid and wasn't superseded by user selecting a track
-            if (currentRequestId != autoplayRequestId) {
-                Log.d(TAG, "Autoplay discarded: newer request or user selection occurred")
-                return@getRecommendationsForSong
-            }
-            if (MUSIC_ID != currentSongId || track_position != currentPosSnapshot) {
-                Log.d(TAG, "Autoplay discarded: active track or position changed")
-                return@getRecommendationsForSong
-            }
+            val p = player ?: return@getRecommendationsForSong
+            if (playingId != currentlyPlayingTrackId || currentPosition != track_position ||
+                p.playbackState != Player.STATE_ENDED || !p.playWhenReady
+            ) return@getRecommendationsForSong
 
-            if (recommendedSongs.isNotEmpty()) {
-                val queue = trackQueue ?: ArrayList()
-                val newIds = recommendedSongs.mapNotNull { it.id }.filter { !queue.contains(it) }
-                if (newIds.isNotEmpty()) {
-                    queue.addAll(newIds)
-                    trackQueue = queue
-                    // Only advance if the user is still at the end of the previous queue
-                    if (track_position == currentPosSnapshot && track_position < queue.size - 1) {
-                        track_position++
-                        MUSIC_ID = queue[track_position]
-                        playTrack()
-                        showNotification()
-                        updateWidget()
-                        appContext?.let { toastCtx ->
-                            android.widget.Toast.makeText(toastCtx, "Autoplay: Playing recommended tracks", android.widget.Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
+            val queue = trackQueue ?: arrayListOf<String?>(playingId)
+            val newIds = recommendations.mapNotNull { it.id?.takeIf(String::isNotBlank) }
+                .distinct().filter { it !in queue && it != currentSong.id }
+            if (newIds.isNotEmpty()) {
+                trackQueue = queue
+                val next = queue.size
+                queue.addAll(newIds)
+                track_position = next
+                MUSIC_ID = queue[next]
+                playTrack()
             }
         }
+    }
+
+    fun stopPlayback() {
+        playbackGeneration++
+        trackRequest?.cancel()
+        cancelAutoplay()
+        player?.pause()
+        player?.stop()
     }
 
     fun setPlaybackSpeed(speed: Float) {
@@ -605,134 +678,51 @@ object MusicPlayerManager {
         return player?.playbackParameters?.speed ?: 1.0f
     }
 
-    fun nextTrack() {
-        acquireWakeLock(30000L)
-        isTransitioning = true
+    fun nextTrack() = advanceTrack(automatic = false)
 
-        if (trackQueue.isNullOrEmpty()) {
-            if (!MUSIC_ID.isNullOrEmpty()) {
-                trackQueue = arrayListOf(MUSIC_ID)
-                track_position = 0
-            } else {
-                isTransitioning = false
-                releaseWakeLock()
-                return
-            }
-        }
-        val p = player ?: run {
-            isTransitioning = false
-            releaseWakeLock()
-            return
+    private fun advanceTrack(automatic: Boolean) {
+        val p = player ?: return
+        val queue = trackQueue.orEmpty()
+        val currentId = if (automatic) currentlyPlayingTrackId else MUSIC_ID
+        val index = if (queue.getOrNull(track_position) == currentId) track_position else queue.indexOf(currentId)
+        val validIndices = queue.indices.filter { !queue[it].isNullOrBlank() }
+        val next = when {
+            p.shuffleModeEnabled && validIndices.any { it != index } ->
+                validIndices.filter { it != index }.random()
+            else -> validIndices.firstOrNull { it > index }
+                ?: validIndices.firstOrNull().takeIf { p.repeatMode == Player.REPEAT_MODE_ALL }
         }
 
-        if (trackQueue!!.isEmpty()) {
-            isTransitioning = false
-            releaseWakeLock()
-            return
-        }
-
-        if (track_position >= trackQueue!!.size - 1) {
-            when (p.repeatMode) {
-                Player.REPEAT_MODE_ONE -> {
-                    p.seekTo(0)
-                    p.play()
-                    isTransitioning = false
-                    releaseWakeLock()
-                    return
-                }
-                Player.REPEAT_MODE_ALL -> {
-                    track_position = 0
-                }
-                else -> {
-                    // Check Autoplay Recommended Music
-                    val prefs = sharedPreferenceManager ?: appContext?.let { SharedPreferenceManager.getInstance(it) }
-                    if (prefs?.isAutoplayEnabled == true && CURRENT_TRACK?.data?.isNotEmpty() == true) {
-                        val currentSong = CURRENT_TRACK!!.data!![0]
-                        if (currentSong != null) {
-                            fetchAndAppendAutoplayRecommendations(currentSong)
-                            return
-                        }
-                    }
-                    // If no autoplay, restart current track or seek to beginning
-                    p.seekTo(0)
-                    p.play()
-                    isTransitioning = false
-                    releaseWakeLock()
-                    return
-                }
-            }
-        } else {
-            if (p.shuffleModeEnabled && trackQueue!!.size > 1) {
-                var newPos: Int
-                do { newPos = (Math.random() * trackQueue!!.size).toInt() } while (newPos == track_position)
-                track_position = newPos
-            } else { track_position++ }
-        }
-        
-        try {
-            MUSIC_ID = trackQueue!![track_position]
+        if (next != null) {
+            track_position = next
+            MUSIC_ID = queue[next]
             playTrack()
-            showNotification()
-            updateWidget()
-        } catch (e: Exception) {
-            if (trackQueue!!.isNotEmpty()) {
-                track_position = 0
-                MUSIC_ID = trackQueue!![0]
-                playTrack()
-            } else {
-                isTransitioning = false
-                releaseWakeLock()
+        } else if (automatic) {
+            val song = CURRENT_TRACK?.data?.firstOrNull()
+            if (sharedPreferenceManager?.isAutoplayEnabled == true && song != null) {
+                fetchAndAppendAutoplayRecommendations(song)
             }
+        } else if (p.currentMediaItem != null) {
+            p.seekTo(0L)
+            p.play()
         }
     }
 
     fun prevTrack() {
-        acquireWakeLock(30000L)
-        isTransitioning = true
-
-        if (trackQueue.isNullOrEmpty()) {
-            if (!MUSIC_ID.isNullOrEmpty()) {
-                player?.seekTo(0)
-                player?.play()
-            }
-            isTransitioning = false
-            releaseWakeLock()
-            return
-        }
-        val p = player ?: run {
-            isTransitioning = false
-            releaseWakeLock()
-            return
-        }
-
-        if (p.currentPosition > 3000) {
-            p.seekTo(0)
+        val p = player ?: return
+        val queue = trackQueue.orEmpty()
+        val index = track_position.takeIf { queue.getOrNull(it) == MUSIC_ID } ?: queue.indexOf(MUSIC_ID)
+        val previous = queue.indices.lastOrNull { it < index && !queue[it].isNullOrBlank() }
+            ?: queue.indices.lastOrNull { !queue[it].isNullOrBlank() }
+                .takeIf { p.repeatMode == Player.REPEAT_MODE_ALL }
+        if (p.currentPosition <= 3000L && previous != null) {
+            track_position = previous
+            MUSIC_ID = queue[previous]
+            playTrack()
+        } else if (p.currentMediaItem != null) {
+            p.seekTo(0L)
             p.play()
-            isTransitioning = false
-            releaseWakeLock()
-            return
         }
-
-        if (track_position <= 0) {
-            if (p.repeatMode == Player.REPEAT_MODE_ALL) {
-                track_position = trackQueue!!.size - 1
-            } else {
-                p.seekTo(0)
-                p.play()
-                isTransitioning = false
-                releaseWakeLock()
-                return
-            }
-        } else {
-            if (p.shuffleModeEnabled && trackQueue!!.size > 1) {
-                track_position = (Math.random() * trackQueue!!.size).toInt()
-            } else { track_position-- }
-        }
-        
-        MUSIC_ID = trackQueue!![track_position]
-        playTrack()
-        showNotification()
-        updateWidget()
     }
 
     private fun getStateString(state: Int): String = when (state) {
